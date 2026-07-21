@@ -1,0 +1,1 @@
+Training policy: use only on systems you own or have explicit permission to test.

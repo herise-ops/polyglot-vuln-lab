@@ -1,0 +1,2 @@
+Welcome to the local polyglot security training lab.
+This file is safe demo content. The file-reading code around it is intentionally insecure.

@@ -1,0 +1,91 @@
+services:
+  gateway:
+    build: ./gateway
+    environment:
+      PYTHON_SERVICE_URL: http://python-service:5001
+      JAVA_SERVICE_URL: http://java-service:8081
+      CSHARP_SERVICE_URL: http://csharp-service:8082
+      PHP_SERVICE_URL: http://php-service:8083
+      COBOL_SERVICE_URL: http://cobol-service:8084
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - python-service
+      - java-service
+      - csharp-service
+      - php-service
+      - cobol-service
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks: [labnet]
+
+  python-service:
+    build: ./python-service
+    environment:
+      LAB_UNSAFE_MODE: ${LAB_UNSAFE_MODE:-false}
+    ports:
+      - "127.0.0.1:5001:5001"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/data
+    networks: [labnet]
+
+  java-service:
+    build: ./java-service
+    ports:
+      - "127.0.0.1:8081:8081"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks: [labnet]
+
+  csharp-service:
+    build: ./csharp-service
+    ports:
+      - "127.0.0.1:8082:8082"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks: [labnet]
+
+  php-service:
+    build: ./php-service
+    ports:
+      - "127.0.0.1:8083:8083"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks: [labnet]
+
+  cobol-service:
+    build: ./cobol-service
+    ports:
+      - "127.0.0.1:8084:8084"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: ["ALL"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    networks: [labnet]
+
+networks:
+  labnet:
+    driver: bridge

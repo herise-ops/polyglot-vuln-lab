@@ -1,0 +1,26 @@
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #0a1020; color: #edf2ff; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, #1b2d56, #0a1020 42%); }
+header, main, footer { width: min(1180px, calc(100% - 32px)); margin: auto; }
+header { padding: 64px 0 28px; }
+h1 { font-size: clamp(2rem, 5vw, 4rem); margin: 4px 0 10px; letter-spacing: -0.04em; }
+.eyebrow { color: #8fb3ff; letter-spacing: .18em; font-size: .78rem; font-weight: 800; }
+.warning { display: inline-block; margin-top: 14px; padding: 10px 14px; border: 1px solid #f4b860; border-radius: 12px; color: #ffd596; background: #2b2113; }
+main { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; padding: 20px 0 40px; }
+.panel { background: rgba(17, 27, 50, .9); border: 1px solid #2a3b64; border-radius: 18px; padding: 22px; box-shadow: 0 16px 50px rgba(0,0,0,.2); }
+.full { grid-column: 1 / -1; }
+.panel-heading, .button-row { display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+h2 { margin-top: 0; }
+form { display: grid; gap: 10px; }
+input, textarea, button { font: inherit; border-radius: 10px; border: 1px solid #405682; padding: 11px 13px; }
+input, textarea { color: #fff; background: #0b1428; }
+textarea { min-height: 86px; resize: vertical; }
+button { color: #081226; background: #9bbcff; font-weight: 800; cursor: pointer; }
+button:hover { filter: brightness(1.08); }
+pre { min-height: 72px; overflow: auto; white-space: pre-wrap; background: #070d19; padding: 14px; border-radius: 10px; border: 1px solid #223253; }
+.status-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.status-grid article, .comments article { background: #0b1428; padding: 14px; border: 1px solid #2d426e; border-radius: 12px; }
+.status-grid span { display: block; color: #8ff0b1; margin-top: 4px; }
+.comments { display: grid; gap: 10px; margin-top: 14px; }
+footer { padding: 10px 0 40px; color: #9ba9c6; }
+@media (max-width: 760px) { main { grid-template-columns: 1fr; } .full { grid-column: auto; } .status-grid { grid-template-columns: repeat(2, 1fr); } }

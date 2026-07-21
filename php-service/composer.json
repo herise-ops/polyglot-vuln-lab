@@ -1,0 +1,8 @@
+{
+  "name": "lab/polyglot-php-service",
+  "description": "Intentionally vulnerable PHP service for SCA and SAST testing",
+  "require": {
+    "php": ">=7.4",
+    "guzzlehttp/guzzle": "6.5.2"
+  }
+}

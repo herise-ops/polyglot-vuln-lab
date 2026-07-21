@@ -1,0 +1,79 @@
+parameters:
+  - name: jobName
+    type: string
+
+  - name: environmentName
+    type: string
+
+  - name: artifactName
+    type: string
+    default: application
+
+  # Leave empty for environments that do not target a registered VM.
+  - name: resourceName
+    type: string
+    default: ''
+
+  - name: resourceType
+    type: string
+    default: virtualMachine
+
+  - name: deploymentCommand
+    type: string
+    default: |
+      echo "Deployment directory: ${ARTIFACT_DIRECTORY}"
+
+      cd "${ARTIFACT_DIRECTORY}"
+
+      if [ ! -f docker-compose.yml ]; then
+        echo "ERROR: docker-compose.yml was not found."
+        exit 1
+      fi
+
+      echo "Services included in the deployment:"
+      docker compose config --services
+
+      echo "Stopping the previous deployment..."
+      docker compose down --remove-orphans || true
+
+      echo "Building and starting the Docker services..."
+      docker compose up -d --build
+
+      echo "Running containers:"
+      docker compose ps
+
+      echo "Docker application deployed successfully."
+
+jobs:
+  - deployment: ${{ parameters.jobName }}
+    displayName: Deploy to ${{ upper(parameters.environmentName) }}
+
+    environment:
+      name: ${{ parameters.environmentName }}
+
+      # When resourceName is provided, execute this job directly
+      # on the registered virtual-machine resource.
+      ${{ if ne(parameters.resourceName, '') }}:
+        resourceName: ${{ parameters.resourceName }}
+        resourceType: ${{ parameters.resourceType }}
+
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: none
+
+            - download: current
+              artifact: ${{ parameters.artifactName }}
+              displayName: Download pipeline artifact
+
+            - bash: |
+                set -euo pipefail
+
+                echo "Environment: ${{ parameters.environmentName }}"
+                echo "Artifact: ${{ parameters.artifactName }}"
+
+                ${{ parameters.deploymentCommand }}
+              displayName: Deploy Docker application
+              env:
+                ARTIFACT_DIRECTORY: $(Pipeline.Workspace)/${{ parameters.artifactName }}

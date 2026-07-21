@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Polyglot Vulnerable Web Lab</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <p class="eyebrow">LOCAL DEVSECOPS TRAINING</p>
+    <h1>Polyglot Vulnerable Web Lab</h1>
+    <p>One dashboard, seven languages, intentionally insecure code, dependencies, containers, and IaC.</p>
+    <div class="warning">Run only on 127.0.0.1 in an authorized disposable lab.</div>
+  </header>
+
+  <main>
+    <section class="panel full">
+      <div class="panel-heading"><h2>Service health</h2><button id="refresh-status">Refresh</button></div>
+      <div id="status-grid" class="status-grid"><span>Loading...</span></div>
+    </section>
+
+    <section class="panel">
+      <h2>Python + SQL search</h2>
+      <p>Search the seeded SQLite user table.</p>
+      <form id="search-form">
+        <input id="search-query" value="alice" aria-label="Search query">
+        <button>Search</button>
+      </form>
+      <pre id="search-output"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Diagnostics</h2>
+      <p>Command-injection data flow; simulation mode is on by default.</p>
+      <form id="diagnostic-form">
+        <input id="diagnostic-host" value="localhost" aria-label="Host">
+        <button>Run</button>
+      </form>
+      <pre id="diagnostic-output"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>PHP document viewer</h2>
+      <p>Loads a document using an intentionally unsafe path construction.</p>
+      <form id="file-form">
+        <input id="file-name" value="welcome.txt" aria-label="Filename">
+        <button>Read</button>
+      </form>
+      <pre id="file-output"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>COBOL report</h2>
+      <p>A modern HTTP wrapper calls a compiled GnuCOBOL program.</p>
+      <form id="report-form">
+        <input id="report-name" value="Alice" aria-label="Customer name">
+        <button>Generate</button>
+      </form>
+      <pre id="report-output"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Broken access control</h2>
+      <p>Read user/account records without a valid session.</p>
+      <div class="button-row">
+        <button id="java-user">Java user #2</button>
+        <button id="csharp-account">C# account #2</button>
+        <button id="admin-config">Admin config</button>
+      </div>
+      <pre id="access-output"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Comment wall</h2>
+      <p>The browser intentionally renders stored comments with an unsafe HTML sink.</p>
+      <form id="comment-form">
+        <input id="comment-author" value="Student" aria-label="Author">
+        <textarea id="comment-text" aria-label="Comment">Scanner test comment</textarea>
+        <button>Post</button>
+      </form>
+      <div id="comments" class="comments"></div>
+    </section>
+  </main>
+
+  <footer>Intentionally vulnerable. Fake data and fake secrets only.</footer>
+  <script src="/app.js"></script>
+</body>
+</html>

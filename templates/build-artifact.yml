@@ -1,0 +1,70 @@
+parameters:
+  - name: artifactName
+    type: string
+    default: application
+
+  - name: buildCommand
+    type: string
+    default: |
+      echo "Validating docker-compose.yml..."
+      docker compose config
+
+      echo "Building all service images..."
+      docker compose build
+
+jobs:
+  - job: BuildApplication
+    displayName: Build services and publish deployment artifact
+
+    steps:
+      - checkout: self
+        clean: true
+        fetchDepth: 1
+
+      - bash: |
+          set -euo pipefail
+
+          echo "Running repository build..."
+          ${{ parameters.buildCommand }}
+
+          artifact_directory="$(Build.ArtifactStagingDirectory)/application"
+
+          echo "Preparing deployment artifact..."
+          rm -rf "${artifact_directory}"
+          mkdir -p "${artifact_directory}"
+
+          # Include only the files required to rebuild/deploy the application.
+          # Scanner-only IaC, documentation, fake secret samples, generated
+          # binaries, and the removed smoke-test script are not packaged.
+          rsync -a \
+            --exclude="node_modules" \
+            --exclude="dist" \
+            --exclude="target" \
+            --exclude="bin" \
+            --exclude="obj" \
+            --exclude="__pycache__" \
+            --exclude="*.class" \
+            --exclude="*.jar" \
+            --exclude=".env" \
+            --exclude=".env.*" \
+            --exclude="scripts" \
+            docker-compose.yml \
+            gateway \
+            python-service \
+            java-service \
+            csharp-service \
+            php-service \
+            cobol-service \
+            "${artifact_directory}/"
+
+          echo "Artifact contents:"
+          find "${artifact_directory}" \
+            -maxdepth 3 \
+            -type f \
+            | sort \
+            | head -200
+        displayName: Build and prepare artifact
+
+      - publish: $(Build.ArtifactStagingDirectory)/application
+        artifact: ${{ parameters.artifactName }}
+        displayName: Publish pipeline artifact
