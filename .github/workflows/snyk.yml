@@ -1,0 +1,163 @@
+name: Snyk Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 1"   # weekly Monday scan, catches newly disclosed vulns
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF to the Security tab
+  actions: read            # required by upload-sarif to check workflow run context
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. Open Source / Dependency scanning (SCA)
+  # ---------------------------------------------------------------
+  snyk-sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run Snyk to check for vulnerable dependencies
+        uses: snyk/actions/node@master   # swap for python/, golang/, maven/, gradle/, dotnet/, php/, ruby/
+        
+        # DEV GATE: continue-on-error removed intentionally. A High/Critical
+        # finding (per --severity-threshold below) now fails this job,
+        # which — once required in branch protection — blocks the PR merge.
+        
+        # continue-on-error: true          # let the job continue so SARIF still uploads
+        
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --sarif-file-output=snyk-sca.sarif --severity-threshold=high
+
+      - name: Upload SCA results to GitHub Code Scanning
+        if: always()   # upload findings even when the scan step above fails the job
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-sca.sarif
+          category: snyk-sca
+
+  # ---------------------------------------------------------------
+  # 2. Static code analysis (SAST)
+  # ---------------------------------------------------------------
+  snyk-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Snyk Code
+        uses: snyk/actions/node@master
+        # DEV GATE: continue-on-error removed intentionally — same reasoning as the SCA job above.
+        
+        # continue-on-error: true
+        
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: code test
+          args: --sarif-file-output=snyk-code.sarif
+
+      - name: Upload Code results to GitHub Code Scanning
+        if: always()   # upload findings even when the scan step above fails the job
+        
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-code.sarif
+          category: snyk-code
+
+    # ---------------------------------------------------------------
+  # 3. Container image scanning (skips gracefully if no Dockerfile yet)
+  # ---------------------------------------------------------------
+
+  snyk-container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - name: Check for Dockerfile
+        id: check_dockerfile
+        run: |
+          if [ -f "Dockerfile" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No Dockerfile found — skipping container scan."
+          fi
+ 
+      - name: Build image
+        if: steps.check_dockerfile.outputs.found == 'true'
+        run: docker build -t myapp:${{ github.sha }} .
+ 
+      - name: Run Snyk Container
+        if: steps.check_dockerfile.outputs.found == 'true'
+        uses: snyk/actions/docker@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: myapp:${{ github.sha }}
+          args: --sarif-file-output=snyk-container.sarif
+ 
+      - name: Patch invalid security-severity values in SARIF
+        if: steps.check_dockerfile.outputs.found == 'true'
+        run: |
+          if [ -f "snyk-container.sarif" ]; then
+            echo "Before patch:"
+            grep -o '"security-severity":[^,}]*' snyk-container.sarif | sort -u || true
+ 
+            jq 'del(.. | objects | .["security-severity"]?)' snyk-container.sarif > snyk-container-fixed.sarif
+ 
+            echo "After patch:"
+            grep -o '"security-severity":[^,}]*' snyk-container-fixed.sarif | sort -u || true
+ 
+            mv snyk-container-fixed.sarif snyk-container.sarif
+          fi
+ 
+      - name: Upload Container results to GitHub Code Scanning
+        if: steps.check_dockerfile.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-container.sarif
+          category: snyk-container
+
+  # ---------------------------------------------------------------
+  # 4. Infrastructure as Code scanning (skips gracefully if no IaC files yet)
+  # ---------------------------------------------------------------
+  snyk-iac:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Snyk IaC
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          npm install -g snyk
+          snyk iac test --sarif-file-output=snyk-iac.sarif || true
+
+      - name: Check SARIF was generated
+        id: check_sarif
+        run: |
+          if [ -f "snyk-iac.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No IaC files found — skipping SARIF upload."
+          fi
+
+      - name: Upload IaC results to GitHub Code Scanning
+        if: steps.check_sarif.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-iac.sarif
+          category: snyk-iac
