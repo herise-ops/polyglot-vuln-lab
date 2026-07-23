@@ -221,6 +221,7 @@ jobs:
 
   snyk-dast:
     if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    # Uncomment needs once testing is complete:
     # needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
@@ -237,8 +238,8 @@ jobs:
             --name probely-agent \
             --network host \
             -e AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
-            probely/farcaster-agent:latest
-          sleep 5
+            probely/farcaster-onprem-agent:latest
+          sleep 15
 
       - name: Trigger Snyk/Probely DAST Scan
         run: |
@@ -249,10 +250,10 @@ jobs:
       - name: Tear Down Stack and Agent
         if: always()
         run: |
-          docker stop snyk-agent || true
-          docker rm snyk-agent || true
+          docker stop probely-agent || true
+          docker rm probely-agent || true
           docker compose down -v
-
+          
   # ===========================================================================
   # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
