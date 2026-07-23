@@ -242,10 +242,10 @@ jobs:
           sleep 5
 
       - name: Trigger Snyk/Probely DAST Scan
-        uses: Probely/probely-github-action@v1
-        with:
-          api-key: ${{ secrets.SNYK_DAST_API_KEY }}
-          target-id: ${{ secrets.SNYK_TARGET_ID }}
+        run: |
+          curl -X POST "https://plus.probely.app/api/targets/${{ secrets.SNYK_TARGET_ID_UAT }}/scan/" \
+            -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
+            -H "Content-Type: application/json"
 
       - name: Tear Down Stack and Agent
         if: always()
