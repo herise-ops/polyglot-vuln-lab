@@ -234,11 +234,10 @@ jobs:
       - name: Start Snyk Scanning Agent
         run: |
           docker run -d \
-            --name snyk-agent \
+            --name probely-agent \
             --network host \
-            --restart always \
             -e AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
-            snyk/farcaster-agent
+            probely/farcaster-agent:latest
           sleep 5
 
       - name: Trigger Snyk/Probely DAST Scan
