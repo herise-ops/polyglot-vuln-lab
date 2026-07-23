@@ -222,6 +222,7 @@ jobs:
   
   snyk-dast:
     if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
