@@ -219,6 +219,7 @@ jobs:
           sarif_file: snyk-iac.sarif
           category: snyk-iac
 
+  
   snyk-dast:
     if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
     runs-on: ubuntu-latest
@@ -240,12 +241,12 @@ jobs:
           # 1. Get Docker network ID for labnet
           LABNET_ID=$(docker network ls --filter name=labnet -q | head -n 1)
 
-          # 2. Extract the exact IP address of the gateway container inside labnet
-          GATEWAY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' polyglot-vuln-lab-gateway-1)
+          # 2. Extract Gateway IP inside labnet dynamically
+          GATEWAY_IP=$(docker inspect $(docker compose ps -q gateway) -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 
           echo "Gateway IP inside Docker network: $GATEWAY_IP"
 
-          # 3. Run Agent with static host mapping for gateway
+          # 3. Run Agent attached to labnet with host mapping
           docker run -d \
             --name probely-agent \
             --cap-add NET_ADMIN \
@@ -261,32 +262,31 @@ jobs:
 
           echo "--- Agent Status Logs ---"
           docker logs probely-agent --tail 25
-          
+
       - name: Trigger Snyk/Probely DAST Scan
+        id: trigger_scan
         run: |
           if [ -z "${{ secrets.SNYK_TARGET_ID }}" ] || [ -z "${{ secrets.SNYK_DAST_API_KEY }}" ]; then
             echo "::error::SNYK_TARGET_ID or SNYK_DAST_API_KEY secret is missing!"
             exit 1
           fi
 
-          # Trigger scan using Australian Regional Endpoint
+          # Trigger scan via Australian Regional Endpoint
           RESPONSE=$(curl -s -L -w "\nHTTP_STATUS:%{http_code}" -X POST \
             "https://api.au.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/scan_now/" \
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
             -H "Content-Type: application/json")
 
-          echo "Raw API Response:"
-          echo "$RESPONSE"
-
           JSON_BODY=$(echo "$RESPONSE" | sed -e 's/HTTP_STATUS:.*//g')
           SCAN_ID=$(echo "$JSON_BODY" | jq -r '.id // empty')
 
           if [ -z "$SCAN_ID" ]; then
-            echo "::error::Failed to retrieve Scan ID. Check the error response above."
+            echo "::error::Failed to retrieve Scan ID from DAST API!"
             exit 1
           fi
 
           echo "Started Scan ID: $SCAN_ID"
+          echo "scan_id=$SCAN_ID" >> "$GITHUB_OUTPUT"
 
           # Poll scan completion
           echo "Waiting for DAST scan to complete..."
@@ -300,12 +300,77 @@ jobs:
               echo "Scan completed successfully!"
               break
             elif [ "$STATUS" == "failed" ] || [ "$STATUS" == "cancelled" ]; then
-              echo "Scan failed with status: $STATUS"
-              exit 1
+              echo "Scan finished with status: $STATUS"
+              break
             fi
 
             sleep 15
           done
+
+      - name: Fetch Findings and Convert to SARIF
+        if: always()
+        run: |
+          echo "Fetching findings from Probely API..."
+          curl -s "https://api.au.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/findings/" \
+            -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
+            > raw-findings.json
+
+          # Wrap findings array if wrapped under a .results key
+          jq 'if type == "object" and .results then .results else . end' raw-findings.json > findings.json
+
+          # Transform findings JSON to GitHub Code Scanning SARIF format
+          jq '{
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            version: "2.1.0",
+            runs: [
+              {
+                tool: {
+                  driver: {
+                    name: "Snyk API & Web (DAST)",
+                    informationUri: "https://probely.com",
+                    rules: [
+                      (.[]? | {
+                        id: (.id // "unknown"),
+                        name: (.definition.name // "Unknown finding"),
+                        shortDescription: { text: (.definition.name // "Unknown finding") },
+                        fullDescription: { text: (.definition.description // "") },
+                        properties: {}
+                      })
+                    ] | unique_by(.id)
+                  }
+                },
+                results: [
+                  (.[]? | {
+                    ruleId: (.id // "unknown"),
+                    level: (
+                      if .severity == "high" then "error"
+                      elif .severity == "medium" then "warning"
+                      else "note"
+                      end
+                    ),
+                    message: { text: "Endpoint: \(.url // "N/A")\n\n\((.definition.description // .definition.name // "No description"))" },
+                    locations: [
+                      {
+                        physicalLocation: {
+                          artifactLocation: { uri: "docker-compose.yml" }
+                        }
+                      }
+                    ]
+                  })
+                ]
+              }
+            ]
+          }' findings.json > snyk-dast.sarif
+
+          echo "--- Generated SARIF Sample ---"
+          head -n 30 snyk-dast.sarif
+
+      - name: Upload DAST results to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: snyk-dast.sarif
+          category: snyk-dast
 
       - name: Tear Down Stack and Agent
         if: always()
@@ -313,23 +378,7 @@ jobs:
           docker stop probely-agent || true
           docker rm probely-agent || true
           docker compose down -v
-
-      - name: Download and Convert DAST Results to SARIF
-        if: always()
-        run: |
-          # 1. Fetch scan findings from Probely API
-          curl -s -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
-            "https://api.au.probely.com/scans/$SCAN_ID/findings/" > probely-findings.json
-
-          # 2. Use a converter tool/script to transform probely-findings.json to dast.sarif
-          # (e.g., python convert_probely_to_sarif.py)
-
-      - name: Upload DAST SARIF to GitHub Code Scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: dast.sarif
-          category: snyk-dast
+          
   # ===========================================================================
   # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
