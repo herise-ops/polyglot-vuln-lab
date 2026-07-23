@@ -377,8 +377,7 @@ jobs:
         run: |
           docker stop probely-agent || true
           docker rm probely-agent || true
-          docker compose down -v
-          
+          docker compose down -v 
   # ===========================================================================
   # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
