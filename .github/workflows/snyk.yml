@@ -243,27 +243,32 @@ jobs:
 
       - name: Trigger Snyk/Probely DAST Scan
         run: |
-          # 1. Trigger the scan and capture the Scan ID
-          RESPONSE=$(curl -s -X POST "https://plus.probely.app/api/targets/${{ secrets.SNYK_TARGET_ID_UAT }}/scan/" \
+          # 1. Trigger the scan and capture raw output
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "https://plus.probely.app/api/targets/${{ secrets.SNYK_TARGET_ID_UAT }}/scan/" \
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
             -H "Content-Type: application/json")
 
-          SCAN_ID=$(echo "$RESPONSE" | jq -r '.id')
-          echo "Scan started with ID: $SCAN_ID"
+          echo "Raw API Response:"
+          echo "$RESPONSE"
 
-          if [ "$SCAN_ID" == "null" ] || [ -z "$SCAN_ID" ]; then
-            echo "Failed to start scan: $RESPONSE"
+          # Extract JSON body (everything before HTTP_STATUS)
+          JSON_BODY=$(echo "$RESPONSE" | sed -e 's/HTTP_STATUS:.*//g')
+
+          SCAN_ID=$(echo "$JSON_BODY" | jq -r '.id // empty')
+          echo "Scan ID: $SCAN_ID"
+
+          if [ -z "$SCAN_ID" ]; then
+            echo "Failed to retrieve valid Scan ID. Check the raw response above!"
             exit 1
           fi
 
-          # 2. Poll every 15 seconds until the scan finishes
+          # 2. Poll until completed
           echo "Waiting for DAST scan to complete..."
           while true; do
-            STATUS=$(curl -s -X GET "https://plus.probely.app/api/scans/$SCAN_ID/" \
-              -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
-              | jq -r '.status')
+            STATUS_RESP=$(curl -s -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" "https://plus.probely.app/api/scans/$SCAN_ID/")
+            STATUS=$(echo "$STATUS_RESP" | jq -r '.status // empty')
 
-            echo "Current scan status: $STATUS"
+            echo "Current status: $STATUS"
 
             if [ "$STATUS" == "completed" ] || [ "$STATUS" == "finished" ]; then
               echo "Scan completed successfully!"
