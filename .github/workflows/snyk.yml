@@ -3,14 +3,14 @@ name: Snyk Security Scan
 # ---------------------------------------------------------------------------
 # PHASE MODEL
 #
-# DEV        -> pull_request into main. Fast feedback: SCA + SAST only,
-#               hard gate (blocks merge via branch Ruleset).
-# UAT        -> push to the `uat` branch. Full suite: SCA + SAST + Container
-#               + IaC + DAST, hard gate.
-# STAGING    -> push to the `staging` branch. Full suite again, gated behind
-#               the `staging` GitHub Environment.
+# DEV         -> pull_request into main. Fast feedback: SCA + SAST only,
+#                hard gate (blocks merge via branch Ruleset).
+# UAT         -> push to the `uat` branch. Full suite: SCA + SAST + Container
+#                + IaC + DAST, hard gate.
+# STAGING     -> push to the `staging` branch. Full suite again, gated behind
+#                the `staging` GitHub Environment.
 # PRODUCTION -> push to the `production` branch. Full suite again, gated
-#               behind the `production` Environment — final human checkpoint.
+#                behind the `production` Environment — final human checkpoint.
 # ---------------------------------------------------------------------------
 
 on:
@@ -219,9 +219,9 @@ jobs:
           sarif_file: snyk-iac.sarif
           category: snyk-iac
 
+  
   snyk-dast:
     if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
-    needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -229,31 +229,155 @@ jobs:
       - name: Start Application Stack via Docker Compose
         run: |
           docker compose up -d --build
-          sleep 20 # Wait for all microservices & gateway to fully initialize
+          sleep 20 # Wait for application services to spin up
 
       - name: Start Snyk Scanning Agent
         run: |
+          if [ -z "${{ secrets.SNYK_AGENT_TOKEN }}" ]; then
+            echo "::error::SNYK_AGENT_TOKEN secret is missing or empty!"
+            exit 1
+          fi
+
+          # 1. Get Docker network ID for labnet
+          LABNET_ID=$(docker network ls --filter name=labnet -q | head -n 1)
+
+          # 2. Extract Gateway IP inside labnet dynamically
+          GATEWAY_IP=$(docker inspect $(docker compose ps -q gateway) -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+          echo "Gateway IP inside Docker network: $GATEWAY_IP"
+
+          # 3. Run Agent attached to labnet with host mapping
           docker run -d \
-            --name snyk-agent \
-            --network host \
-            --restart always \
-            -e AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
-            snyk/farcaster-agent
-          sleep 5
+            --name probely-agent \
+            --cap-add NET_ADMIN \
+            --device /dev/net/tun \
+            --network "$LABNET_ID" \
+            --add-host gateway:$GATEWAY_IP \
+            -e FARCASTER_AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
+            -e FARCASTER_API_URL="https://api.au.probely.com" \
+            probely/farcaster-onprem-agent:v3
+
+          echo "Waiting 30 seconds for agent connection..."
+          sleep 30
+
+          echo "--- Agent Status Logs ---"
+          docker logs probely-agent --tail 25
 
       - name: Trigger Snyk/Probely DAST Scan
-        uses: probely/probely-action@v1
+        id: trigger_scan
+        run: |
+          if [ -z "${{ secrets.SNYK_TARGET_ID }}" ] || [ -z "${{ secrets.SNYK_DAST_API_KEY }}" ]; then
+            echo "::error::SNYK_TARGET_ID or SNYK_DAST_API_KEY secret is missing!"
+            exit 1
+          fi
+
+          # Trigger scan via Australian Regional Endpoint
+          RESPONSE=$(curl -s -L -w "\nHTTP_STATUS:%{http_code}" -X POST \
+            "https://api.au.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/scan_now/" \
+            -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
+            -H "Content-Type: application/json")
+
+          JSON_BODY=$(echo "$RESPONSE" | sed -e 's/HTTP_STATUS:.*//g')
+          SCAN_ID=$(echo "$JSON_BODY" | jq -r '.id // empty')
+
+          if [ -z "$SCAN_ID" ]; then
+            echo "::error::Failed to retrieve Scan ID from DAST API!"
+            exit 1
+          fi
+
+          echo "Started Scan ID: $SCAN_ID"
+          echo "scan_id=$SCAN_ID" >> "$GITHUB_OUTPUT"
+
+          # Poll scan completion
+          echo "Waiting for DAST scan to complete..."
+          while true; do
+            STATUS_RESP=$(curl -s -L -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" "https://api.au.probely.com/scans/$SCAN_ID/")
+            STATUS=$(echo "$STATUS_RESP" | jq -r '.status // empty')
+
+            echo "Current scan status: $STATUS"
+
+            if [ "$STATUS" == "completed" ] || [ "$STATUS" == "finished" ]; then
+              echo "Scan completed successfully!"
+              break
+            elif [ "$STATUS" == "failed" ] || [ "$STATUS" == "cancelled" ]; then
+              echo "Scan finished with status: $STATUS"
+              break
+            fi
+
+            sleep 15
+          done
+
+      - name: Fetch Findings and Convert to SARIF
+        if: always()
+        run: |
+          echo "Fetching findings from Probely API..."
+          curl -s "https://api.au.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/findings/" \
+            -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
+            > raw-findings.json
+
+          # Ensure we are working with an array
+          jq 'if type == "object" and .results then .results else . end' raw-findings.json > findings.json
+
+          # Convert to valid SARIF schema forcing all IDs to strings
+          jq '{
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            version: "2.1.0",
+            runs: [
+              {
+                tool: {
+                  driver: {
+                    name: "Snyk API & Web (DAST)",
+                    informationUri: "https://probely.com",
+                    rules: [
+                      (.[]? | {
+                        id: ((.id // "unknown") | tostring),
+                        name: (.definition.name // "Unknown finding"),
+                        shortDescription: { text: (.definition.name // "Unknown finding") },
+                        fullDescription: { text: (.definition.description // "") },
+                        properties: {}
+                      })
+                    ] | unique_by(.id)
+                  }
+                },
+                results: [
+                  (.[]? | {
+                    ruleId: ((.id // "unknown") | tostring),
+                    level: (
+                      if .severity == "high" then "error"
+                      elif .severity == "medium" then "warning"
+                      else "note"
+                      end
+                    ),
+                    message: { text: "Endpoint: \(.url // "N/A")\n\n\((.definition.description // .definition.name // "No description"))" },
+                    locations: [
+                      {
+                        physicalLocation: {
+                          artifactLocation: { uri: "docker-compose.yml" }
+                        }
+                      }
+                    ]
+                  })
+                ]
+              }
+            ]
+          }' findings.json > snyk-dast.sarif
+
+          echo "--- Validating Generated SARIF ---"
+          jq empty snyk-dast.sarif && echo "SARIF JSON is well-formed!"
+
+      - name: Upload DAST results to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
         with:
-          api-key: ${{ secrets.SNYK_DAST_API_KEY }}
-          target-id: ${{ secrets.SNYK_TARGET_ID_UAT }}
+          sarif_file: snyk-dast.sarif
+          category: snyk-dast
 
       - name: Tear Down Stack and Agent
         if: always()
         run: |
-          docker stop snyk-agent || true
-          docker rm snyk-agent || true
-          docker compose down -v
-
+          docker stop probely-agent || true
+          docker rm probely-agent || true
+          docker compose down -v 
   # ===========================================================================
   # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
