@@ -315,10 +315,10 @@ jobs:
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
             > raw-findings.json
 
-          # Wrap findings array if wrapped under a .results key
+          # Ensure we are working with an array
           jq 'if type == "object" and .results then .results else . end' raw-findings.json > findings.json
 
-          # Transform findings JSON to GitHub Code Scanning SARIF format
+          # Convert to valid SARIF schema forcing all IDs to strings
           jq '{
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
             version: "2.1.0",
@@ -330,7 +330,7 @@ jobs:
                     informationUri: "https://probely.com",
                     rules: [
                       (.[]? | {
-                        id: (.id // "unknown"),
+                        id: ((.id // "unknown") | tostring),
                         name: (.definition.name // "Unknown finding"),
                         shortDescription: { text: (.definition.name // "Unknown finding") },
                         fullDescription: { text: (.definition.description // "") },
@@ -341,7 +341,7 @@ jobs:
                 },
                 results: [
                   (.[]? | {
-                    ruleId: (.id // "unknown"),
+                    ruleId: ((.id // "unknown") | tostring),
                     level: (
                       if .severity == "high" then "error"
                       elif .severity == "medium" then "warning"
@@ -362,12 +362,12 @@ jobs:
             ]
           }' findings.json > snyk-dast.sarif
 
-          echo "--- Generated SARIF Sample ---"
-          head -n 30 snyk-dast.sarif
+          echo "--- Validating Generated SARIF ---"
+          jq empty snyk-dast.sarif && echo "SARIF JSON is well-formed!"
 
       - name: Upload DAST results to GitHub Code Scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-dast.sarif
           category: snyk-dast
