@@ -244,7 +244,7 @@ jobs:
       - name: Trigger Snyk/Probely DAST Scan
         run: |
           # 1. Trigger the scan using /scan_now/ endpoint
-          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "https://plus.probely.app/api/targets/${{ secrets.SNYK_TARGET_ID_UAT }}/scan_now/" \
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "https://plus.probely.app/api/targets/${{ secrets.SNYK_TARGET_ID }}/scan_now/" \
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
             -H "Content-Type: application/json")
 
