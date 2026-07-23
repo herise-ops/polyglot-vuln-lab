@@ -237,24 +237,26 @@ jobs:
             exit 1
           fi
 
-          # Find the exact labnet network created by docker compose
+          # 1. Get Docker network ID for labnet
           LABNET_ID=$(docker network ls --filter name=labnet -q | head -n 1)
 
-          if [ -z "$LABNET_ID" ]; then
-            echo "::error::Could not find labnet docker network!"
-            exit 1
-          fi
+          # 2. Extract the exact IP address of the gateway container inside labnet
+          GATEWAY_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' polyglot-vuln-lab-gateway-1)
 
+          echo "Gateway IP inside Docker network: $GATEWAY_IP"
+
+          # 3. Run Agent with static host mapping for gateway
           docker run -d \
             --name probely-agent \
             --cap-add NET_ADMIN \
             --device /dev/net/tun \
             --network "$LABNET_ID" \
+            --add-host gateway:$GATEWAY_IP \
             -e FARCASTER_AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
             -e FARCASTER_API_URL="https://api.au.probely.com" \
             probely/farcaster-onprem-agent:v3
 
-          echo "Waiting 30 seconds for agent to connect to Snyk cloud..."
+          echo "Waiting 30 seconds for agent connection..."
           sleep 30
 
           echo "--- Agent Status Logs ---"
