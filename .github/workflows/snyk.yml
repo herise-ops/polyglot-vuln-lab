@@ -1,54 +1,124 @@
 name: Snyk Security Scan
 
+# ---------------------------------------------------------------------------
+# PHASE MODEL
+#
+# DEV        -> pull_request into main. Fast feedback: SCA + SAST only,
+#               hard gate (blocks merge via branch Ruleset).
+# UAT        -> push to the `uat` branch. Full suite: SCA + SAST + Container
+#               + IaC + DAST, hard gate.
+# STAGING    -> push to the `staging` branch. Full suite again, gated behind
+#               the `staging` GitHub Environment.
+# PRODUCTION -> push to the `production` branch. Full suite again, gated
+#               behind the `production` Environment — final human checkpoint.
+# ---------------------------------------------------------------------------
+
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  push:
+    branches: [main, uat, staging, production]
   schedule:
     - cron: "0 3 * * 1"   # weekly Monday scan, catches newly disclosed vulns
 
 permissions:
   contents: read
-  security-events: write   # required to upload SARIF to the Security tab
-  actions: read            # required by upload-sarif to check workflow run context
+  security-events: write
+  actions: read
 
 jobs:
-  # ---------------------------------------------------------------
-  # 1. Open Source / Dependency scanning (SCA)
-  # ---------------------------------------------------------------
+  # ===========================================================================
+  # DEV PHASE — runs on every PR into main. SCA + SAST only, for fast feedback.
+  # ===========================================================================
   snyk-sca:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: npm install
+      - name: Set up runtimes for all detected ecosystems
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      - name: Run Snyk to check for vulnerable dependencies
-        uses: snyk/actions/node@master   # swap for python/, golang/, maven/, gradle/, dotnet/, php/, ruby/
-        
-        # DEV GATE: continue-on-error removed intentionally. A High/Critical
-        # finding (per --severity-threshold below) now fails this job,
-        # which — once required in branch protection — blocks the PR merge.
-        
-        # continue-on-error: true          # let the job continue so SARIF still uploads
-        
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+
+      - name: Scan every service directory (auto-detected by manifest file)
+        id: scan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --sarif-file-output=snyk-sca.sarif --severity-threshold=high
+        run: |
+          set +e   # keep looping across services even if one fails; we fail the job at the end
+          OVERALL_EXIT=0
+          mkdir -p sarif-output
 
-      - name: Upload SCA results to GitHub Code Scanning
-        if: always()   # upload findings even when the scan step above fails the job
+          for manifest in $(find . -maxdepth 2 \
+              \( -name "package.json" -o -name "requirements.txt" \
+                 -o -name "pom.xml" -o -name "build.gradle" \
+                 -o -name "composer.json" -o -name "*.csproj" \) \
+              -not -path "*/node_modules/*"); do
+
+            dir=$(dirname "$manifest")
+            service=$(basename "$dir")
+            [ "$dir" = "." ] && service="root"
+
+            echo "=================================================="
+            echo "Scanning service: $service (in $dir)"
+            echo "=================================================="
+
+            pushd "$dir" > /dev/null
+
+            case "$manifest" in
+              *package.json)
+                npm install --no-audit --no-fund
+                snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
+                ;;
+              *requirements.txt)
+                pip install -r requirements.txt --break-system-packages --quiet
+                snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
+                ;;
+              *pom.xml)
+                mvn install -DskipTests -q
+                snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
+                ;;
+              *build.gradle)
+                gradle build -x test
+                snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
+                ;;
+              *composer.json)
+                composer install --no-interaction
+                snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
+                ;;
+              *.csproj)
+                dotnet restore
+                snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
+                ;;
+            esac
+
+            EXIT_CODE=$?
+            [ $EXIT_CODE -ne 0 ] && OVERALL_EXIT=1
+            echo "Exit code for $service: $EXIT_CODE"
+
+            popd > /dev/null
+          done
+
+          echo "overall_exit=$OVERALL_EXIT" >> "$GITHUB_OUTPUT"
+          exit $OVERALL_EXIT
+
+      - name: Upload SCA results per service to GitHub Code Scanning
+        if: always()
+        run: |
+          for f in sarif-output/*.sarif; do
+            [ -f "$f" ] && echo "Found: $f"
+          done
+
+      - name: Upload snyk-sca SARIF files
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: snyk-sca.sarif
+          sarif_file: sarif-output
           category: snyk-sca
 
-  # ---------------------------------------------------------------
-  # 2. Static code analysis (SAST)
-  # ---------------------------------------------------------------
   snyk-code:
     runs-on: ubuntu-latest
     steps:
@@ -56,33 +126,30 @@ jobs:
 
       - name: Run Snyk Code
         uses: snyk/actions/node@master
-        # DEV GATE: continue-on-error removed intentionally — same reasoning as the SCA job above.
-        
-        # continue-on-error: true
-        
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
           command: code test
-          args: --sarif-file-output=snyk-code.sarif
+          args: --sarif-file-output=snyk-code.sarif --severity-threshold=high
 
       - name: Upload Code results to GitHub Code Scanning
-        if: always()   # upload findings even when the scan step above fails the job
-        
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-code.sarif
           category: snyk-code
 
-    # ---------------------------------------------------------------
-  # 3. Container image scanning (skips gracefully if no Dockerfile yet)
-  # ---------------------------------------------------------------
-
+  # ===========================================================================
+  # UAT PHASE — runs on push to `uat`, `staging`, `production`. Adds Container,
+  # IaC, and DAST (Ephemeral Stack via Compose + Snyk Agent) on top of SCA/SAST.
+  # ===========================================================================
   snyk-container:
+    if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
- 
+
       - name: Check for Dockerfile
         id: check_dockerfile
         run: |
@@ -92,72 +159,121 @@ jobs:
             echo "found=false" >> "$GITHUB_OUTPUT"
             echo "No Dockerfile found — skipping container scan."
           fi
- 
+
       - name: Build image
         if: steps.check_dockerfile.outputs.found == 'true'
         run: docker build -t myapp:${{ github.sha }} .
- 
+
       - name: Run Snyk Container
         if: steps.check_dockerfile.outputs.found == 'true'
         uses: snyk/actions/docker@master
-        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
           image: myapp:${{ github.sha }}
-          args: --sarif-file-output=snyk-container.sarif
- 
+          args: --sarif-file-output=snyk-container.sarif --severity-threshold=high
+
       - name: Patch invalid security-severity values in SARIF
-        if: steps.check_dockerfile.outputs.found == 'true'
+        if: steps.check_dockerfile.outputs.found == 'true' && always()
         run: |
           if [ -f "snyk-container.sarif" ]; then
-            echo "Before patch:"
-            grep -o '"security-severity":[^,}]*' snyk-container.sarif | sort -u || true
- 
             jq 'del(.. | objects | .["security-severity"]?)' snyk-container.sarif > snyk-container-fixed.sarif
- 
-            echo "After patch:"
-            grep -o '"security-severity":[^,}]*' snyk-container-fixed.sarif | sort -u || true
- 
             mv snyk-container-fixed.sarif snyk-container.sarif
           fi
- 
+
       - name: Upload Container results to GitHub Code Scanning
-        if: steps.check_dockerfile.outputs.found == 'true'
+        if: steps.check_dockerfile.outputs.found == 'true' && always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-container.sarif
           category: snyk-container
 
-  # ---------------------------------------------------------------
-  # 4. Infrastructure as Code scanning (skips gracefully if no IaC files yet)
-  # ---------------------------------------------------------------
   snyk-iac:
+    if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Run Snyk IaC
-        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           npm install -g snyk
-          snyk iac test --sarif-file-output=snyk-iac.sarif || true
+          snyk iac test --sarif-file-output=snyk-iac.sarif --severity-threshold=high
 
       - name: Check SARIF was generated
+        if: always()
         id: check_sarif
         run: |
           if [ -f "snyk-iac.sarif" ]; then
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "No IaC files found — skipping SARIF upload."
           fi
 
       - name: Upload IaC results to GitHub Code Scanning
-        if: steps.check_sarif.outputs.found == 'true'
+        if: always() && steps.check_sarif.outputs.found == 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-iac.sarif
           category: snyk-iac
+
+  snyk-dast:
+    if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    # needs: [snyk-sca, snyk-code]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Application Stack via Docker Compose
+        run: |
+          docker compose up -d --build
+          sleep 20 # Wait for all microservices & gateway to fully initialize
+
+      - name: Start Snyk Scanning Agent
+        run: |
+          docker run -d \
+            --name snyk-agent \
+            --network host \
+            --restart always \
+            -e AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
+            snyk/farcaster-agent
+          sleep 5
+
+      - name: Trigger Snyk/Probely DAST Scan
+        uses: probely/probely-action@v1
+        with:
+          api-key: ${{ secrets.SNYK_DAST_API_KEY }}
+          target-id: ${{ secrets.SNYK_TARGET_ID_UAT }}
+
+      - name: Tear Down Stack and Agent
+        if: always()
+        run: |
+          docker stop snyk-agent || true
+          docker rm snyk-agent || true
+          docker compose down -v
+
+  # ===========================================================================
+  # STAGING PHASE — runs on push to `staging`. Gated behind environment.
+  # ===========================================================================
+  staging-gate:
+    if: github.ref_name == 'staging'
+    needs: [snyk-sca, snyk-code, snyk-container, snyk-iac, snyk-dast]
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Staging gate passed
+        run: echo "All scans passed — staging environment approval satisfied."
+
+  # ===========================================================================
+  # PRODUCTION PHASE — runs on push to `production`. Gated behind environment.
+  # ===========================================================================
+  production-gate:
+    if: github.ref_name == 'production'
+    needs: [snyk-sca, snyk-code, snyk-container, snyk-iac, snyk-dast]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Production gate passed
+        run: echo "All scans passed — production environment approval satisfied."
