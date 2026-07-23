@@ -221,8 +221,6 @@ jobs:
 
   snyk-dast:
     if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
-    # Uncomment needs once testing is complete:
-    # needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -230,20 +228,26 @@ jobs:
       - name: Start Application Stack via Docker Compose
         run: |
           docker compose up -d --build
-          sleep 20 # Wait for all microservices & gateway to fully initialize
+          sleep 20 # Wait for application services to spin up
 
       - name: Start Snyk Scanning Agent
         run: |
           docker run -d \
             --name probely-agent \
             --network host \
+            -e FARCASTER_AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
             -e AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
             probely/farcaster-onprem-agent:latest
-          sleep 15
+
+          echo "Waiting 30 seconds for agent to connect to Snyk cloud..."
+          sleep 30
+
+          echo "--- Agent Status Logs ---"
+          docker logs probely-agent --tail 15
 
       - name: Trigger Snyk/Probely DAST Scan
         run: |
-          # 1. Sanity Check: Ensure secrets are non-empty
+          # 1. Sanity Check: Ensure secrets exist
           if [ -z "${{ secrets.SNYK_TARGET_ID }}" ]; then
             echo "::error::SNYK_TARGET_ID secret is empty or missing!"
             exit 1
@@ -254,9 +258,7 @@ jobs:
             exit 1
           fi
 
-          echo "Target ID character length: ${#TARGET_ID_VAL}"
-          
-          # 2. Trigger the scan (using -L to follow redirects)
+          # 2. Trigger the scan using API
           RESPONSE=$(curl -s -L -w "\nHTTP_STATUS:%{http_code}" -X POST \
             "https://api.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/scan_now/" \
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
@@ -269,14 +271,14 @@ jobs:
           SCAN_ID=$(echo "$JSON_BODY" | jq -r '.id // empty')
 
           if [ -z "$SCAN_ID" ]; then
-            echo "::error::Failed to retrieve Scan ID. Verify Target ID and API Key."
+            echo "::error::Failed to retrieve Scan ID."
             exit 1
           fi
 
           echo "Started Scan ID: $SCAN_ID"
 
           # 3. Poll scan status until completion
-          echo "Waiting for DAST scan to finish..."
+          echo "Waiting for DAST scan to complete..."
           while true; do
             STATUS_RESP=$(curl -s -L -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" "https://api.probely.com/scans/$SCAN_ID/")
             STATUS=$(echo "$STATUS_RESP" | jq -r '.status // empty')
@@ -293,9 +295,7 @@ jobs:
 
             sleep 15
           done
-        env:
-          TARGET_ID_VAL: ${{ secrets.SNYK_TARGET_ID }}
-          
+
       - name: Tear Down Stack and Agent
         if: always()
         run: |
