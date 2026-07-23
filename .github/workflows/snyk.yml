@@ -237,25 +237,29 @@ jobs:
             exit 1
           fi
 
-          # Get the Docker network created by docker compose
-          COMPOSE_NET=$(docker network ls --filter name=labnet -q | head -n 1)
+          # Find the exact labnet network created by docker compose
+          LABNET_ID=$(docker network ls --filter name=labnet -q | head -n 1)
 
-          # Run agent isolated from host network stack
+          if [ -z "$LABNET_ID" ]; then
+            echo "::error::Could not find labnet docker network!"
+            exit 1
+          fi
+
           docker run -d \
             --name probely-agent \
             --cap-add NET_ADMIN \
             --device /dev/net/tun \
-            ${COMPOSE_NET:+--network "$COMPOSE_NET"} \
+            --network "$LABNET_ID" \
             -e FARCASTER_AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
             -e FARCASTER_API_URL="https://api.au.probely.com" \
             probely/farcaster-onprem-agent:v3
 
-          echo "Waiting 30 seconds for agent to connect..."
+          echo "Waiting 30 seconds for agent to connect to Snyk cloud..."
           sleep 30
 
           echo "--- Agent Status Logs ---"
           docker logs probely-agent --tail 25
-
+          
       - name: Trigger Snyk/Probely DAST Scan
         run: |
           if [ -z "${{ secrets.SNYK_TARGET_ID }}" ] || [ -z "${{ secrets.SNYK_DAST_API_KEY }}" ]; then
