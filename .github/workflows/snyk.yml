@@ -237,16 +237,20 @@ jobs:
             exit 1
           fi
 
+          # Get the Docker network created by docker compose
+          COMPOSE_NET=$(docker network ls --filter name=labnet -q | head -n 1)
+
+          # Run agent isolated from host network stack
           docker run -d \
             --name probely-agent \
             --cap-add NET_ADMIN \
             --device /dev/net/tun \
-            --network host \
+            ${COMPOSE_NET:+--network "$COMPOSE_NET"} \
             -e FARCASTER_AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
             -e FARCASTER_API_URL="https://api.au.probely.com" \
             probely/farcaster-onprem-agent:v3
 
-          echo "Waiting 30 seconds for agent to connect to Snyk cloud..."
+          echo "Waiting 30 seconds for agent to connect..."
           sleep 30
 
           echo "--- Agent Status Logs ---"
