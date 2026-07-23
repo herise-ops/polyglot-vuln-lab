@@ -330,7 +330,6 @@ jobs:
         with:
           sarif_file: dast.sarif
           category: snyk-dast
-
   # ===========================================================================
   # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
