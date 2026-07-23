@@ -243,10 +243,39 @@ jobs:
 
       - name: Trigger Snyk/Probely DAST Scan
         run: |
-          curl -X POST "https://plus.probely.app/api/targets/${{ secrets.SNYK_TARGET_ID_UAT }}/scan/" \
+          # 1. Trigger the scan and capture the Scan ID
+          RESPONSE=$(curl -s -X POST "https://plus.probely.app/api/targets/${{ secrets.SNYK_TARGET_ID_UAT }}/scan/" \
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
-            -H "Content-Type: application/json"
+            -H "Content-Type: application/json")
 
+          SCAN_ID=$(echo "$RESPONSE" | jq -r '.id')
+          echo "Scan started with ID: $SCAN_ID"
+
+          if [ "$SCAN_ID" == "null" ] || [ -z "$SCAN_ID" ]; then
+            echo "Failed to start scan: $RESPONSE"
+            exit 1
+          fi
+
+          # 2. Poll every 15 seconds until the scan finishes
+          echo "Waiting for DAST scan to complete..."
+          while true; do
+            STATUS=$(curl -s -X GET "https://plus.probely.app/api/scans/$SCAN_ID/" \
+              -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
+              | jq -r '.status')
+
+            echo "Current scan status: $STATUS"
+
+            if [ "$STATUS" == "completed" ] || [ "$STATUS" == "finished" ]; then
+              echo "Scan completed successfully!"
+              break
+            elif [ "$STATUS" == "failed" ] || [ "$STATUS" == "cancelled" ]; then
+              echo "Scan ended with status: $STATUS"
+              exit 1
+            fi
+
+            sleep 15
+          done
+          
       - name: Tear Down Stack and Agent
         if: always()
         run: |
