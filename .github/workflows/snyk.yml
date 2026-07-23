@@ -242,10 +242,10 @@ jobs:
           sleep 5
 
       - name: Trigger Snyk/Probely DAST Scan
-        uses: probely/probely-action@v1
+        uses: Probely/scan-action@v1
         with:
           api-key: ${{ secrets.SNYK_DAST_API_KEY }}
-          target-id: ${{ secrets.SNYK_TARGET_ID_UAT }}
+          target-id: ${{ secrets.SNYK_TARGET_ID }}
 
       - name: Tear Down Stack and Agent
         if: always()
