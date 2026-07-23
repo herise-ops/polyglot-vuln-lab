@@ -3,14 +3,14 @@ name: Snyk Security Scan
 # ---------------------------------------------------------------------------
 # PHASE MODEL
 #
-# DEV        -> pull_request into main. Fast feedback: SCA + SAST only,
-#               hard gate (blocks merge via branch Ruleset).
-# UAT        -> push to the `uat` branch. Full suite: SCA + SAST + Container
-#               + IaC + DAST, hard gate.
-# STAGING    -> push to the `staging` branch. Full suite again, gated behind
-#               the `staging` GitHub Environment.
+# DEV         -> pull_request into main. Fast feedback: SCA + SAST only,
+#                hard gate (blocks merge via branch Ruleset).
+# UAT         -> push to the `uat` branch. Full suite: SCA + SAST + Container
+#                + IaC + DAST, hard gate.
+# STAGING     -> push to the `staging` branch. Full suite again, gated behind
+#                the `staging` GitHub Environment.
 # PRODUCTION -> push to the `production` branch. Full suite again, gated
-#               behind the `production` Environment — final human checkpoint.
+#                behind the `production` Environment — final human checkpoint.
 # ---------------------------------------------------------------------------
 
 on:
@@ -259,9 +259,9 @@ jobs:
             exit 1
           fi
 
-          # Trigger scan
+          # Trigger scan using Australian Regional Endpoint
           RESPONSE=$(curl -s -L -w "\nHTTP_STATUS:%{http_code}" -X POST \
-            "https://api.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/scan_now/" \
+            "https://api.au.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/scan_now/" \
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
             -H "Content-Type: application/json")
 
@@ -281,7 +281,7 @@ jobs:
           # Poll scan completion
           echo "Waiting for DAST scan to complete..."
           while true; do
-            STATUS_RESP=$(curl -s -L -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" "https://api.probely.com/scans/$SCAN_ID/")
+            STATUS_RESP=$(curl -s -L -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" "https://api.au.probely.com/scans/$SCAN_ID/")
             STATUS=$(echo "$STATUS_RESP" | jq -r '.status // empty')
 
             echo "Current scan status: $STATUS"
@@ -303,7 +303,7 @@ jobs:
           docker stop probely-agent || true
           docker rm probely-agent || true
           docker compose down -v
-          
+
   # ===========================================================================
   # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
