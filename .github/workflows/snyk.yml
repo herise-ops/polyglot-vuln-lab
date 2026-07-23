@@ -314,6 +314,23 @@ jobs:
           docker rm probely-agent || true
           docker compose down -v
 
+      - name: Download and Convert DAST Results to SARIF
+        if: always()
+        run: |
+          # 1. Fetch scan findings from Probely API
+          curl -s -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
+            "https://api.au.probely.com/scans/$SCAN_ID/findings/" > probely-findings.json
+
+          # 2. Use a converter tool/script to transform probely-findings.json to dast.sarif
+          # (e.g., python convert_probely_to_sarif.py)
+
+      - name: Upload DAST SARIF to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: dast.sarif
+          category: snyk-dast
+
   # ===========================================================================
   # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
