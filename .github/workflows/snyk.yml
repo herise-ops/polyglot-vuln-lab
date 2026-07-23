@@ -6,17 +6,11 @@ name: Snyk Security Scan
 # DEV        -> pull_request into main. Fast feedback: SCA + SAST only,
 #               hard gate (blocks merge via branch Ruleset).
 # UAT        -> push to the `uat` branch. Full suite: SCA + SAST + Container
-#               + IaC, hard gate.
+#               + IaC + DAST, hard gate.
 # STAGING    -> push to the `staging` branch. Full suite again, gated behind
-#               the `staging` GitHub Environment (configure required
-#               reviewers there if you want a manual check before this runs).
+#               the `staging` GitHub Environment.
 # PRODUCTION -> push to the `production` branch. Full suite again, gated
-#               behind the `production` Environment — configure required
-#               reviewers there; this is your last human checkpoint.
-#
-# DAST (Snyk API & Web) is intentionally NOT in this file — it needs a live
-# deployed URL, so it belongs in snyk-dast.yml, triggered after an actual
-# staging/production deployment succeeds, not here.
+#               behind the `production` Environment — final human checkpoint.
 # ---------------------------------------------------------------------------
 
 on:
@@ -58,8 +52,6 @@ jobs:
           OVERALL_EXIT=0
           mkdir -p sarif-output
 
-          # Find every directory (repo root included) containing a recognized
-          # manifest file, then scan it with the right install + snyk command.
           for manifest in $(find . -maxdepth 2 \
               \( -name "package.json" -o -name "requirements.txt" \
                  -o -name "pom.xml" -o -name "build.gradle" \
@@ -134,7 +126,6 @@ jobs:
 
       - name: Run Snyk Code
         uses: snyk/actions/node@master
-        # DEV GATE: same reasoning as snyk-sca above.
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -149,13 +140,12 @@ jobs:
           category: snyk-code
 
   # ===========================================================================
-  # UAT PHASE — runs on push to the `uat` branch. Adds Container + IaC on top
-  # of the same SCA/SAST checks, still a hard gate (no environment/reviewer
-  # step yet — UAT is typically an automated promotion, not a human gate).
+  # UAT PHASE — runs on push to `uat`, `staging`, `production`. Adds Container,
+  # IaC, and DAST (Ephemeral Stack via Compose + Snyk Agent) on top of SCA/SAST.
   # ===========================================================================
   snyk-container:
     if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
-    needs: [snyk-sca, snyk-code]   # visually chains UAT after the Dev stage in the Actions graph
+    needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -177,7 +167,6 @@ jobs:
       - name: Run Snyk Container
         if: steps.check_dockerfile.outputs.found == 'true'
         uses: snyk/actions/docker@master
-        # UAT GATE: no continue-on-error — this now blocks promotion past UAT.
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -201,13 +190,12 @@ jobs:
 
   snyk-iac:
     if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
-    needs: [snyk-sca, snyk-code]   # same stage as snyk-container — both run in parallel within UAT
+    needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Run Snyk IaC
-        # UAT GATE: no continue-on-error, no `|| true` — this now blocks.
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -231,15 +219,47 @@ jobs:
           sarif_file: snyk-iac.sarif
           category: snyk-iac
 
+  snyk-dast:
+    if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    needs: [snyk-sca, snyk-code]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Application Stack via Docker Compose
+        run: |
+          docker compose up -d --build
+          sleep 20 # Wait for all microservices & gateway to fully initialize
+
+      - name: Start Snyk Scanning Agent
+        run: |
+          docker run -d \
+            --name snyk-agent \
+            --network host \
+            --restart always \
+            -e AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
+            snyk/farcaster-agent
+          sleep 5
+
+      - name: Trigger Snyk/Probely DAST Scan
+        uses: probely/probely-action@v1
+        with:
+          api-key: ${{ secrets.SNYK_DAST_API_KEY }}
+          target-id: ${{ secrets.SNYK_TARGET_ID_UAT }}
+
+      - name: Tear Down Stack and Agent
+        if: always()
+        run: |
+          docker stop snyk-agent || true
+          docker rm snyk-agent || true
+          docker compose down -v
+
   # ===========================================================================
-  # STAGING PHASE — runs on push to `staging`. Same full suite, but gated
-  # behind the `staging` GitHub Environment. Configure required reviewers on
-  # that Environment (Settings -> Environments -> staging) if you want a
-  # human check before this proceeds; otherwise it behaves like UAT.
+  # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
   staging-gate:
     if: github.ref_name == 'staging'
-    needs: [snyk-sca, snyk-code, snyk-container, snyk-iac]
+    needs: [snyk-sca, snyk-code, snyk-container, snyk-iac, snyk-dast]
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -247,14 +267,11 @@ jobs:
         run: echo "All scans passed — staging environment approval satisfied."
 
   # ===========================================================================
-  # PRODUCTION PHASE — runs on push to `production`. Gated behind the
-  # `production` Environment. This should be your strictest required-reviewer
-  # configuration — nothing should be discovering new Critical issues this
-  # late; this is a final human checkpoint before release.
+  # PRODUCTION PHASE — runs on push to `production`. Gated behind environment.
   # ===========================================================================
   production-gate:
     if: github.ref_name == 'production'
-    needs: [snyk-sca, snyk-code, snyk-container, snyk-iac]   # all run within this same push-to-production event
+    needs: [snyk-sca, snyk-code, snyk-container, snyk-iac, snyk-dast]
     runs-on: ubuntu-latest
     environment: production
     steps:
