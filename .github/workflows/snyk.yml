@@ -242,7 +242,7 @@ jobs:
           sleep 5
 
       - name: Trigger Snyk/Probely DAST Scan
-        uses: Probely/scan-action@v1
+        uses: Probely/probely-github-action@v1
         with:
           api-key: ${{ secrets.SNYK_DAST_API_KEY }}
           target-id: ${{ secrets.SNYK_TARGET_ID }}
