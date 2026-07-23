@@ -230,54 +230,27 @@ jobs:
           docker compose up -d --build
           sleep 20 # Wait for application services to spin up
 
-      - name: Start Snyk Scanning Agent & Wait for Connection
+      - name: Start Snyk Scanning Agent
         run: |
-          # 1. Ensure Agent Token is available
           if [ -z "${{ secrets.SNYK_AGENT_TOKEN }}" ]; then
             echo "::error::SNYK_AGENT_TOKEN secret is missing or empty!"
             exit 1
           fi
 
-          # 2. Run the agent container
           docker run -d \
             --name probely-agent \
+            --cap-add NET_ADMIN \
+            --device /dev/net/tun \
             --network host \
             -e FARCASTER_AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
-            -e AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
-            probely/farcaster-onprem-agent:latest
+            -e FARCASTER_API_URL="https://api.au.probely.com" \
+            probely/farcaster-onprem-agent:v3
 
-          echo "Waiting for scanning agent to connect to Snyk cloud..."
+          echo "Waiting 30 seconds for agent to connect to Snyk cloud..."
+          sleep 30
 
-          # 3. Dynamic polling loop to verify the agent connects
-          CONNECTED=false
-          for i in {1..12}; do
-            LOGS=$(docker logs probely-agent 2>&1)
-            
-            # Check if container died prematurely
-            if ! docker ps | grep -q probely-agent; then
-              echo "::error::Agent container exited unexpectedly!"
-              echo "--- Container Exit Logs ---"
-              echo "$LOGS"
-              exit 1
-            fi
-
-            # Check for connection indicators in agent logs
-            if echo "$LOGS" | grep -qiE "connected|registered|tunnel established|ready"; then
-              echo "Agent connected successfully!"
-              CONNECTED=true
-              break
-            fi
-
-            echo "Agent connecting... ($((i * 5))s)"
-            sleep 5
-          done
-
-          echo "--- Agent Container Status Logs ---"
+          echo "--- Agent Status Logs ---"
           docker logs probely-agent --tail 25
-
-          if [ "$CONNECTED" = false ]; then
-            echo "::warning::Agent log check timed out. Attempting scan anyway..."
-          fi
 
       - name: Trigger Snyk/Probely DAST Scan
         run: |
