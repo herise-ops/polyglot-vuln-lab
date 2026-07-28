@@ -61,63 +61,42 @@ jobs:
       - name: Install Snyk CLI
         run: npm install -g snyk
 
-      - name: Scan dependencies across services
+      - name: Install dependencies for all detected ecosystems
+        run: |
+          # Resolve dependencies wherever a matching manifest exists, no
+          # matter what the folder is named. Snyk's --all-projects still
+          # needs a resolved dependency tree for most ecosystems (lockfiles
+          # alone aren't always enough for Python/PHP/.NET).
+          find . -name "requirements.txt" -not -path "*/node_modules/*" \
+            -execdir sh -c 'pip install -r requirements.txt --break-system-packages --quiet' \; \
+            || echo "::warning::one or more pip installs failed"
+
+          find . -name "package.json" -not -path "*/node_modules/*" -maxdepth 3 \
+            -execdir npm install --no-audit --no-fund \; \
+            || echo "::warning::one or more npm installs failed"
+
+          find . -name "composer.json" -not -path "*/vendor/*" \
+            -execdir composer install --no-interaction --no-audit \; \
+            || echo "::warning::one or more composer installs failed"
+
+          find . -name "*.csproj" \
+            -execdir dotnet restore \; \
+            || echo "::warning::one or more dotnet restores failed"
+
+      - name: Scan entire repo with Snyk (all projects, auto-detected)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          FAILED=0
-          for dir in csharp-service php-service python-service java-service gateway; do
-            echo "=================================================="
-            echo "Scanning service: $dir"
-            echo "=================================================="
+          snyk test --all-projects \
+            --severity-threshold=high \
+            --sarif-file-output=snyk-sca.sarif
 
-            # Install/resolve dependencies first — snyk test needs an
-            # actual resolvable dependency tree for most ecosystems,
-            # not just the manifest file sitting on disk.
-            case "$dir" in
-              csharp-service)
-                if [ -d "$dir" ]; then
-                  (cd "$dir" && dotnet restore) || echo "::warning::dotnet restore failed for $dir"
-                fi
-                ;;
-              php-service)
-                if [ -d "$dir" ]; then
-                  (cd "$dir" && composer install --no-interaction) || echo "::warning::composer install failed for $dir"
-                fi
-                ;;
-              python-service)
-                if [ -d "$dir" ]; then
-                  (cd "$dir" && pip install -r requirements.txt --break-system-packages --quiet) || echo "::warning::pip install failed for $dir"
-                fi
-                ;;
-              java-service)
-                # pom.xml is readable statically in most cases — no install needed
-                ;;
-              gateway)
-                if [ -d "$dir" ]; then
-                  (cd "$dir" && npm install --no-audit --no-fund) || echo "::warning::npm install failed for $dir"
-                fi
-                ;;
-            esac
-
-            if [ ! -d "$dir" ]; then
-              echo "Directory $dir not found — skipping."
-              continue
-            fi
-
-            snyk test "./$dir" \
-              --severity-threshold=high \
-              --sarif-file-output="$dir-sca.sarif" || FAILED=1
-          done
-          # COMMENT OUT: SECURITY GATE
-          exit $FAILED
-
-      - name: Upload SARIF to Code Scanning
+      - name: Upload SCA results to GitHub Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: gateway-sca.sarif
-          category: snyk-sca-gateway
+          sarif_file: snyk-sca.sarif
+          category: snyk-sca
 
   snyk-code-and-secrets:
     runs-on: ubuntu-latest
