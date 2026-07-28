@@ -178,15 +178,19 @@ jobs:
       - name: Fetch Existing Snyk Container Issues via API
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-          SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }} 
+          SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }}
         run: |
-          # Download snyk-to-sarif converter tool
-          npm install -g snyk-to-sarif
+          # 1. Install Snyk CLI and SARIF converter
+          npm install -g snyk snyk-to-sarif
 
-          # Export container issues via Snyk CLI
-          snyk container test --file=Dockerfile --json-file-output=snyk-raw.json || true
+          # 2. Extract base image from Dockerfile
+          BASE_IMAGE=$(grep -i '^FROM' Dockerfile | head -n 1 | awk '{print $2}')
+          echo "Scanning base image: $BASE_IMAGE"
 
-          # Convert output to SARIF format
+          # 3. Export findings to JSON
+          snyk container test "$BASE_IMAGE" --file=Dockerfile --org="$SNYK_ORG_ID" --json-file-output=snyk-raw.json || true
+
+          # 4. Convert JSON to SARIF
           snyk-to-sarif -i snyk-raw.json -o snyk-container.sarif
 
       - name: Upload Container results to GitHub
