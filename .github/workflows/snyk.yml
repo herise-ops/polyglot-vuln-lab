@@ -54,7 +54,7 @@ jobs:
               --sarif-file-output="$dir-sca.sarif" || FAILED=1
           done
           # COMMENT OUT: SECURITY GATE
-          # exit $FAILED
+          exit $FAILED
 
       - name: Upload SARIF to Code Scanning
         if: always()
@@ -73,14 +73,14 @@ jobs:
       # 1. Dedicated Secret Scan (Gitleaks)
       - name: Secret Scan (Gitleaks)
         uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true
+        # continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # 2. Snyk SAST (Scans code vulnerabilities + hardcoded secrets)
       - name: Run Snyk Code
         uses: snyk/actions/node@master
-        continue-on-error: true
+        # continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -101,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Run Snyk IaC
-        continue-on-error: true
+        # continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -130,7 +130,7 @@ jobs:
   # ===========================================================================
   snyk-container:
     # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
-    # if: github.ref_name == 'uat' || github.ref_name == 'staging'
+    if: github.ref_name == 'uat' || github.ref_name == 'staging'
     needs: [snyk-sca, snyk-code-and-secrets, snyk-iac]
     runs-on: ubuntu-latest
     steps:
@@ -157,7 +157,7 @@ jobs:
       - name: Run Snyk Container
         if: steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule'
         uses: snyk/actions/docker@master
-        continue-on-error: true
+        # continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -181,7 +181,7 @@ jobs:
 
   snyk-dast:
     # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
-    # if: github.ref_name == 'uat' || github.ref_name == 'staging'
+    if: github.ref_name == 'uat' || github.ref_name == 'staging'
     needs: [snyk-sca, snyk-code-and-secrets, snyk-iac]
     runs-on: ubuntu-latest
     steps:
@@ -313,7 +313,7 @@ jobs:
   # ===========================================================================
   staging-gate:
     # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
-    # if: github.ref_name == 'staging'
+    if: github.ref_name == 'staging'
     needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, snyk-container, snyk-dast]
     runs-on: ubuntu-latest
     environment: staging
