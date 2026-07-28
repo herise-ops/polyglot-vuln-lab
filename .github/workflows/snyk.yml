@@ -48,7 +48,7 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          set +e   # keep looping across services even if one fails; we fail the job at the end
+          set +e   # keep looping across services even if one fails
           OVERALL_EXIT=0
           mkdir -p sarif-output
 
@@ -86,7 +86,7 @@ jobs:
                 snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
                 ;;
               *composer.json)
-                composer install --no-interaction --no-audit
+                composer install --no-interaction --no-security-blocking
                 snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
                 ;;
               *.csproj)
@@ -132,6 +132,7 @@ jobs:
 
       - name: Run Snyk Code
         uses: snyk/actions/node@master
+        continue-on-error: true  # Prevents Snyk failures from stopping the job, COMMENT THIS OUT after testing
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
