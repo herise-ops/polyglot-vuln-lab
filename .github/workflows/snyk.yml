@@ -90,7 +90,26 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk test --all-projects --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-sca.sarif || true
+          snyk test --all-projects --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-sca-raw.sarif || true
+
+      - name: Deduplicate SCA findings across manifests/projects
+        if: always()
+        run: |
+          if [ -s "snyk-sca-raw.sarif" ]; then
+            # Same vulnerability (ruleId) often appears once per manifest
+            # (composer.json, php-service/composer.json, requirements.txt,
+            # python-service/requirements.txt, direct vs transitive, etc).
+            # Merge those into a single result per ruleId, keeping every
+            # location so you don't lose "where" info for triage.
+            jq '
+              .runs[0].results as $results
+              | ($results
+                  | group_by(.ruleId)
+                  | map( (.[0]) + { locations: (map(.locations[]) | unique) } )
+                ) as $deduped
+              | .runs[0].results = $deduped
+            ' snyk-sca-raw.sarif > snyk-sca.sarif
+          fi
 
       - name: Check SCA SARIF output
         if: always()
@@ -115,7 +134,7 @@ jobs:
           if [ -f "snyk-sca.sarif" ]; then
             COUNT=$(jq '[.runs[].results[]? | select(.level == "error")] | length' snyk-sca.sarif 2>/dev/null || echo 0)
             if [ "$COUNT" -gt 0 ]; then
-              echo "::error file=snyk-sca.sarif::Snyk SCA scan found $COUNT High/Critical vulnerabilities!"
+              echo "::error file=snyk-sca.sarif::Snyk SCA scan found $COUNT unique High/Critical vulnerabilities!"
               exit 1
             fi
           fi
@@ -271,14 +290,21 @@ jobs:
             ' results-temp.sarif > results.sarif
           fi
 
-      - name: Upload Container SARIF to GitHub
+      # NOTE: no upload-sarif here anymore. Uploading per-Dockerfile under a
+      # per-service category is exactly what made the same CVE show up as
+      # multiple separate alerts (one per category) in the Security tab.
+      # Instead, stash each leg's SARIF as an artifact and merge them all
+      # in the job below, before doing a single upload.
+      - name: Upload Container SARIF artifact
         if: always() && matrix.dockerfile != 'none'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: results.sarif
-          category: snyk-container-${{ steps.meta.outputs.service }}
+          name: container-sarif-${{ steps.meta.outputs.service }}
+          path: results.sarif
+          if-no-files-found: ignore
+          retention-days: 1
 
-      - name: Evaluate Container Job Status
+      - name: Evaluate Container Job Status (per-Dockerfile, fail-fast only)
         if: always() && matrix.dockerfile != 'none'
         run: |
           if [ -f "results.sarif" ]; then
@@ -289,12 +315,72 @@ jobs:
             fi
           fi
 
+  merge-container-results:
+    needs: [find-dockerfiles, snyk-container]
+    if: always() && needs.find-dockerfiles.outputs.matrix != '["none"]'
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - name: Download all container SARIF artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: container-sarif-*
+          path: container-results
+          merge-multiple: true
+
+      - name: Merge and dedupe container findings across all Dockerfiles
+        run: |
+          shopt -s nullglob
+          FILES=(container-results/*.sarif)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "No container SARIF files to merge."
+            exit 0
+          fi
+          # Combine every Dockerfile's results into one run, then collapse
+          # duplicate ruleIds (same CVE, different Dockerfile) into a single
+          # result, keeping every location so you can still see which
+          # Dockerfiles are affected.
+          jq -s '
+            {
+              "$schema": .[0]["$schema"],
+              version: .[0].version,
+              runs: [{
+                tool: .[0].runs[0].tool,
+                results: (
+                  [ .[].runs[0].results[]? ]
+                  | group_by(.ruleId)
+                  | map( (.[0]) + { locations: (map(.locations[]) | unique) } )
+                )
+              }]
+            }
+          ' "${FILES[@]}" > merged-container.sarif
+
+      - name: Upload merged Container SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: merged-container.sarif
+          category: snyk-container
+
+      - name: Evaluate merged Container Job Status
+        if: always()
+        run: |
+          if [ -f "merged-container.sarif" ]; then
+            COUNT=$(jq '[.runs[].results[]? | select(.level == "error")] | length' merged-container.sarif 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::error file=merged-container.sarif::Container scan found $COUNT unique High/Critical vulnerabilities across all Dockerfiles!"
+              exit 1
+            fi
+          fi
+
   # ===========================================================================
   # UAT PHASE — Heavy scans: DAST live integration
   # ===========================================================================
   snyk-dast:
     if: github.ref_name == 'uat' || github.ref_name == 'staging'
-    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, snyk-container]
+    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, merge-container-results]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -443,7 +529,7 @@ jobs:
   # ===========================================================================
   staging-gate:
     if: github.ref_name == 'staging'
-    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, snyk-container, snyk-dast]
+    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, merge-container-results, snyk-dast]
     runs-on: ubuntu-latest
     environment: staging
     steps:
