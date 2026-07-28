@@ -75,9 +75,19 @@ jobs:
             -execdir npm install --no-audit --no-fund \; \
             || echo "::warning::one or more npm installs failed"
 
-          find . -name "composer.json" -not -path "*/vendor/*" \
-            -execdir sh -c 'COMPOSER_AUDIT=0 composer install --no-interaction --ignore-platform-reqs' \; \
-            || echo "::warning::one or more composer installs failed"
+          # Composer 2.9+ added automatic security-advisory blocking during
+          # install/resolution (not just `composer audit` reporting). This
+          # can't be bypassed with CLI flags — it needs a config entry in
+          # composer.json itself. We patch it in at scan time only, so the
+          # source composer.json in the repo stays untouched.
+          find . -name "composer.json" -not -path "*/vendor/*" | while read -r manifest; do
+            svc_dir=$(dirname "$manifest")
+            echo "Patching advisory policy for $manifest"
+            jq '.config += {"audit": {"abandoned": "report"}, "policy": {"advisories": {"block": false}}}' "$manifest" > "$manifest.tmp" \
+              && mv "$manifest.tmp" "$manifest"
+            (cd "$svc_dir" && composer install --no-interaction --ignore-platform-reqs) \
+              || echo "::warning::composer install still failed for $svc_dir"
+          done
 
           find . -name "*.csproj" \
             -execdir dotnet restore \; \
