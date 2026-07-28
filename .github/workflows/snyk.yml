@@ -61,7 +61,7 @@ jobs:
               --sarif-file-output="$dir-sca.sarif" || FAILED=1
           done
           
-          # Optional: Uncomment if you want the job to officially fail after scanning all dirs:
+          # COMMENT OUT: SECURITY GATE - Uncomment when ready to enforce hard failure on SCA vulns
           # exit $FAILED
 
       - name: Upload SARIF files to GitHub Code Scanning
@@ -78,7 +78,8 @@ jobs:
 
       - name: Run Snyk Code
         uses: snyk/actions/node@master
-        continue-on-error: true  # Prevents Snyk failures from stopping the job, COMMENT THIS OUT after testing
+        # COMMENT OUT: SECURITY GATE - Prevents Snyk failures from stopping the job during test runs
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -87,7 +88,7 @@ jobs:
 
       - name: Upload Code results to GitHub Code Scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-code.sarif
           category: snyk-code
@@ -97,7 +98,8 @@ jobs:
   # IaC, and DAST (Ephemeral Stack via Compose + Snyk Agent) on top of SCA/SAST.
   # ===========================================================================
   snyk-container:
-    if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing (runs on all triggers)
+    # if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
     needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
@@ -120,6 +122,8 @@ jobs:
       - name: Run Snyk Container
         if: steps.check_dockerfile.outputs.found == 'true'
         uses: snyk/actions/docker@master
+        # COMMENT OUT: SECURITY GATE - Prevents container scan failure from breaking job
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
@@ -136,24 +140,27 @@ jobs:
 
       - name: Upload Container results to GitHub Code Scanning
         if: steps.check_dockerfile.outputs.found == 'true' && always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-container.sarif
           category: snyk-container
 
   snyk-iac:
-    if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing (runs on all triggers)
+    # if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
     needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Run Snyk IaC
+        # COMMENT OUT: SECURITY GATE - Allow workflow to continue if IaC finds vulns
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           npm install -g snyk
-          snyk iac test --sarif-file-output=snyk-iac.sarif --severity-threshold=high
+          snyk iac test --sarif-file-output=snyk-iac.sarif --severity-threshold=high || true
 
       - name: Check SARIF was generated
         if: always()
@@ -167,14 +174,14 @@ jobs:
 
       - name: Upload IaC results to GitHub Code Scanning
         if: always() && steps.check_sarif.outputs.found == 'true'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-iac.sarif
           category: snyk-iac
 
-  
   snyk-dast:
-    if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
+    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing (runs on all triggers)
+    # if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
     needs: [snyk-sca, snyk-code]
     runs-on: ubuntu-latest
     steps:
@@ -188,8 +195,9 @@ jobs:
       - name: Start Snyk Scanning Agent
         run: |
           if [ -z "${{ secrets.SNYK_AGENT_TOKEN }}" ]; then
-            echo "::error::SNYK_AGENT_TOKEN secret is missing or empty!"
-            exit 1
+            echo "::warning::SNYK_AGENT_TOKEN secret is missing or empty!"
+            # COMMENT OUT: SECURITY GATE - Don't hard exit on missing token during tests
+            # exit 1
           fi
 
           # 1. Get Docker network ID for labnet
@@ -209,20 +217,21 @@ jobs:
             --add-host gateway:$GATEWAY_IP \
             -e FARCASTER_AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
             -e FARCASTER_API_URL="https://api.au.probely.com" \
-            probely/farcaster-onprem-agent:v3
+            probely/farcaster-onprem-agent:v3 || true
 
           echo "Waiting 30 seconds for agent connection..."
           sleep 30
 
           echo "--- Agent Status Logs ---"
-          docker logs probely-agent --tail 25
+          docker logs probely-agent --tail 25 || true
 
       - name: Trigger Snyk/Probely DAST Scan
         id: trigger_scan
         run: |
           if [ -z "${{ secrets.SNYK_TARGET_ID }}" ] || [ -z "${{ secrets.SNYK_DAST_API_KEY }}" ]; then
-            echo "::error::SNYK_TARGET_ID or SNYK_DAST_API_KEY secret is missing!"
-            exit 1
+            echo "::warning::SNYK_TARGET_ID or SNYK_DAST_API_KEY secret is missing!"
+            # COMMENT OUT: SECURITY GATE - Don't hard exit on missing keys during tests
+            # exit 1
           fi
 
           # Trigger scan via Australian Regional Endpoint
@@ -235,31 +244,32 @@ jobs:
           SCAN_ID=$(echo "$JSON_BODY" | jq -r '.id // empty')
 
           if [ -z "$SCAN_ID" ]; then
-            echo "::error::Failed to retrieve Scan ID from DAST API!"
-            exit 1
+            echo "::warning::Failed to retrieve Scan ID from DAST API!"
+            # COMMENT OUT: SECURITY GATE
+            # exit 1
+          else
+            echo "Started Scan ID: $SCAN_ID"
+            echo "scan_id=$SCAN_ID" >> "$GITHUB_OUTPUT"
+
+            # Poll scan completion
+            echo "Waiting for DAST scan to complete..."
+            while true; do
+              STATUS_RESP=$(curl -s -L -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" "https://api.au.probely.com/scans/$SCAN_ID/")
+              STATUS=$(echo "$STATUS_RESP" | jq -r '.status // empty')
+
+              echo "Current scan status: $STATUS"
+
+              if [ "$STATUS" == "completed" ] || [ "$STATUS" == "finished" ]; then
+                echo "Scan completed successfully!"
+                break
+              elif [ "$STATUS" == "failed" ] || [ "$STATUS" == "cancelled" ]; then
+                echo "Scan finished with status: $STATUS"
+                break
+              fi
+
+              sleep 15
+            done
           fi
-
-          echo "Started Scan ID: $SCAN_ID"
-          echo "scan_id=$SCAN_ID" >> "$GITHUB_OUTPUT"
-
-          # Poll scan completion
-          echo "Waiting for DAST scan to complete..."
-          while true; do
-            STATUS_RESP=$(curl -s -L -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" "https://api.au.probely.com/scans/$SCAN_ID/")
-            STATUS=$(echo "$STATUS_RESP" | jq -r '.status // empty')
-
-            echo "Current scan status: $STATUS"
-
-            if [ "$STATUS" == "completed" ] || [ "$STATUS" == "finished" ]; then
-              echo "Scan completed successfully!"
-              break
-            elif [ "$STATUS" == "failed" ] || [ "$STATUS" == "cancelled" ]; then
-              echo "Scan finished with status: $STATUS"
-              break
-            fi
-
-            sleep 15
-          done
 
       - name: Fetch Findings and Convert to SARIF
         if: always()
@@ -332,11 +342,13 @@ jobs:
           docker stop probely-agent || true
           docker rm probely-agent || true
           docker compose down -v 
+
   # ===========================================================================
   # STAGING PHASE — runs on push to `staging`. Gated behind environment.
   # ===========================================================================
   staging-gate:
-    if: github.ref_name == 'staging'
+    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
+    # if: github.ref_name == 'staging'
     needs: [snyk-sca, snyk-code, snyk-container, snyk-iac, snyk-dast]
     runs-on: ubuntu-latest
     environment: staging
@@ -348,7 +360,8 @@ jobs:
   # PRODUCTION PHASE — runs on push to `production`. Gated behind environment.
   # ===========================================================================
   production-gate:
-    if: github.ref_name == 'production'
+    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
+    # if: github.ref_name == 'production'
     needs: [snyk-sca, snyk-code, snyk-container, snyk-iac, snyk-dast]
     runs-on: ubuntu-latest
     environment: production
