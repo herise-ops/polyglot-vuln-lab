@@ -15,7 +15,7 @@ on:
   push:
     branches: [main, uat, staging]
   schedule:
-    - cron: "0 3 * * 1"   # weekly Monday scan for newly disclosed CVEs
+    - cron: "0 3 * * 1"   # Weekly Monday scan for newly disclosed CVEs
 
 permissions:
   contents: read
@@ -74,10 +74,12 @@ jobs:
           find . -name "composer.json" -not -path "*/vendor/*" | while read -r manifest; do
             svc_dir=$(dirname "$manifest")
             echo "Patching advisory policy for $manifest"
+            cp "$manifest" "$manifest.bak"
             jq '.config += {"audit": {"abandoned": "report"}, "policy": {"advisories": {"block": false}}}' "$manifest" > "$manifest.tmp" \
               && mv "$manifest.tmp" "$manifest"
             (cd "$svc_dir" && composer install --no-interaction --ignore-platform-reqs) \
               || echo "::warning::composer install still failed for $svc_dir"
+            mv "$manifest.bak" "$manifest"
           done
 
           find . -name "*.csproj" \
@@ -88,9 +90,8 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          # Test and generate SARIF output for GitHub Code Scanning
           snyk test --all-projects --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-sca.sarif || true
-          
+
       - name: Check SCA SARIF output
         if: always()
         id: check_sca
@@ -107,6 +108,17 @@ jobs:
         with:
           sarif_file: snyk-sca.sarif
           category: Snyk Open Source
+
+      - name: Evaluate SCA Job Status
+        if: always()
+        run: |
+          if [ -f "snyk-sca.sarif" ]; then
+            COUNT=$(jq '[.runs[].results[]? | select(.level == "error")] | length' snyk-sca.sarif 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::error file=snyk-sca.sarif::Snyk SCA scan found $COUNT High/Critical vulnerabilities!"
+              exit 1
+            fi
+          fi
 
   snyk-code-and-secrets:
     runs-on: ubuntu-latest
@@ -135,10 +147,21 @@ jobs:
 
       - name: Upload Code results to GitHub Code Scanning
         if: always() && steps.check_snyk_code.outputs.found == 'true'
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-code.sarif
           category: snyk-code
+
+      - name: Evaluate Snyk Code Job Status
+        if: always()
+        run: |
+          if [ -f "snyk-code.sarif" ]; then
+            COUNT=$(jq '[.runs[].results[]? | select(.level == "error")] | length' snyk-code.sarif 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::error file=snyk-code.sarif::Snyk Code scan found $COUNT High/Critical vulnerabilities!"
+              exit 1
+            fi
+          fi
 
   snyk-iac:
     runs-on: ubuntu-latest
@@ -165,12 +188,25 @@ jobs:
 
       - name: Upload IaC results to GitHub Code Scanning
         if: always() && steps.check_sarif.outputs.found == 'true'
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-iac.sarif
           category: snyk-iac
 
-  # 1. Discover all Dockerfiles in the repository
+      - name: Evaluate IaC Job Status
+        if: always()
+        run: |
+          if [ -f "snyk-iac.sarif" ]; then
+            COUNT=$(jq '[.runs[].results[]? | select(.level == "error")] | length' snyk-iac.sarif 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::error file=snyk-iac.sarif::Snyk IaC scan found $COUNT High/Critical vulnerabilities!"
+              exit 1
+            fi
+          fi
+
+  # ===========================================================================
+  # DYNAMIC CONTAINER DISCOVERY & SCANNING
+  # ===========================================================================
   find-dockerfiles:
     runs-on: ubuntu-latest
     outputs:
@@ -185,7 +221,6 @@ jobs:
           fi
           echo "matrix=$FILES" >> $GITHUB_OUTPUT
 
-  # 2. Dynamic Container Scan Job
   snyk-container:
     needs: find-dockerfiles
     runs-on: ubuntu-latest
@@ -221,18 +256,15 @@ jobs:
         run: |
           npm install -g snyk snyk-to-sarif
 
-          # Test container base image
           snyk container test "${{ steps.meta.outputs.base_image }}" \
             --file="${{ matrix.dockerfile }}" \
             --org="$SNYK_ORG_ID" \
             --severity-threshold=high \
             --json-file-output=results.json || true
 
-          # Convert JSON to SARIF & Deduplicate
           if [ -s "results.json" ]; then
             snyk-to-sarif -i results.json -o results-temp.sarif
 
-            # Rename tool driver & deduplicate by ruleId/CVE
             jq '
               .runs[].tool.driver.name = "Snyk Container" |
               .runs[].results |= unique_by(.ruleId)
@@ -245,9 +277,20 @@ jobs:
         with:
           sarif_file: results.sarif
           category: snyk-container-${{ steps.meta.outputs.service }}
-          
+
+      - name: Evaluate Container Job Status
+        if: always() && matrix.dockerfile != 'none'
+        run: |
+          if [ -f "results.sarif" ]; then
+            COUNT=$(jq '[.runs[].results[]? | select(.level == "error")] | length' results.sarif 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::error file=results.sarif::Container scan for ${{ steps.meta.outputs.service }} found $COUNT High/Critical vulnerabilities!"
+              exit 1
+            fi
+          fi
+
   # ===========================================================================
-  # UAT PHASE — Heavy scans: Container image build & DAST live integration
+  # UAT PHASE — Heavy scans: DAST live integration
   # ===========================================================================
   snyk-dast:
     if: github.ref_name == 'uat' || github.ref_name == 'staging'
@@ -322,7 +365,6 @@ jobs:
 
           jq 'if type == "object" and .results then .results else . end' raw-findings.json > findings.json
 
-          # Converted SARIF filtered strictly for High/Critical
           jq '{
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
             version: "2.1.0",
@@ -373,10 +415,21 @@ jobs:
 
       - name: Upload DAST results to Code Scanning
         if: always() && steps.check_dast_sarif.outputs.found == 'true'
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-dast.sarif
           category: snyk-dast
+
+      - name: Evaluate DAST Job Status
+        if: always()
+        run: |
+          if [ -f "snyk-dast.sarif" ]; then
+            COUNT=$(jq '[.runs[].results[]? | select(.level == "error")] | length' snyk-dast.sarif 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::error file=snyk-dast.sarif::DAST scan found $COUNT High/Critical vulnerabilities!"
+              exit 1
+            fi
+          fi
 
       - name: Tear Down Stack and Agent
         if: always()
