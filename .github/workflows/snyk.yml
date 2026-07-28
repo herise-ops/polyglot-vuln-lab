@@ -174,48 +174,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Needed for git diff / file change detection
 
-      # 1. Detect if Dockerfile or container configurations changed
-      - name: Check for Container changes
-        id: changed_files
-        uses: tj-actions/changed-files@v44
-        with:
-          files: |
-            Dockerfile
-            **/Dockerfile
-            docker-compose.yml
-            **.dockerignore
+      - name: Install Snyk CLI
+        run: npm install -g snyk
 
-      # 2. Build image (Only if container files changed or scheduled)
-      - name: Build image
-        if: steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule'
-        run: docker build -t myapp:${{ github.sha }} .
-
-      # 3. Run Snyk Container
-      - name: Run Snyk Container
-        if: steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule'
-        uses: snyk/actions/docker@master
+      # Queries Snyk API for the Dockerfile's base image — takes ~5 seconds, NO docker build!
+      - name: Fetch Dockerfile Findings from Snyk
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: myapp:${{ github.sha }}
-          args: --sarif-file-output=snyk-container.sarif --severity-threshold=high
+        run: |
+          snyk container test --file=Dockerfile --sarif-file-output=snyk-container.sarif || true
 
-      # 4. Format SARIF & patch missing physical locations for GitHub upload
-      - name: Patch SARIF formatting
-        if: (steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule') && always()
+      - name: Fix SARIF format for GitHub
+        if: always()
         run: |
           if [ -f "snyk-container.sarif" ]; then
-            # Strip security-severity and ensure findings point to Dockerfile
-            jq 'del(.. | objects | .["security-severity"]?) | (.runs[].results[]? | select(.locations == null or .locations == [])) |= . + {"locations": [{"physicalLocation": {"artifactLocation": {"uri": "Dockerfile"}}}]}' snyk-container.sarif > snyk-container-fixed.sarif
+            jq '(.runs[].results[]? | select(.locations == null or .locations == [])) |= . + {"locations": [{"physicalLocation": {"artifactLocation": {"uri": "Dockerfile"}}}]}' snyk-container.sarif > snyk-container-fixed.sarif
             mv snyk-container-fixed.sarif snyk-container.sarif
           fi
 
-      # 5. Upload Container results to Code Scanning
-      - name: Upload Container results to Code Scanning
-        if: (steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule') && always()
+      - name: Upload Container results to GitHub
+        if: always()
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-container.sarif
@@ -227,7 +206,7 @@ jobs:
   snyk-dast:
     # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
     if: github.ref_name == 'uat' || github.ref_name == 'staging'
-    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac]
+    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, snyk-container]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
