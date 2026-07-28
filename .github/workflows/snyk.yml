@@ -209,7 +209,6 @@ jobs:
         run: |
           npm install -g snyk snyk-to-sarif
 
-          # Add --severity-threshold=high here
           snyk container test "${{ steps.meta.outputs.base_image }}" \
             --file="${{ matrix.dockerfile }}" \
             --org="$SNYK_ORG_ID" \
@@ -219,9 +218,12 @@ jobs:
           # Convert JSON to SARIF
           snyk-to-sarif -i results.json -o results-temp.sarif
 
-          # Update the Tool name inside SARIF to "Snyk Container"
-          jq '.runs[].tool.driver.name = "Snyk Container"' results-temp.sarif > results.sarif
-
+          # Update Tool Name AND Deduplicate results by ruleId/CVE
+          jq '
+            .runs[].tool.driver.name = "Snyk Container" |
+            .runs[].results |= unique_by(.ruleId)
+          ' results-temp.sarif > results.sarif
+          
       - name: Upload Container SARIF to GitHub
         if: always() && matrix.dockerfile != 'none'
         uses: github/codeql-action/upload-sarif@v4
