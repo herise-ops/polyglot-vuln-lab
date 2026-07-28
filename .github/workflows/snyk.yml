@@ -85,13 +85,15 @@ jobs:
             || echo "::warning::one or more dotnet restores failed"
 
       - name: Run Snyk Open Source (SCA)
-        uses: snyk/actions/node@master
-        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --all-projects --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-sca.sarif
+        run: |
+          # Test and generate SARIF output for GitHub Code Scanning
+          snyk test --all-projects --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-sca.sarif || true
           
+          # Monitor projects in Snyk UI to align findings count
+          snyk monitor --all-projects --org=${{ secrets.SNYK_ORG_ID }} || true
+
       - name: Check SCA SARIF output
         if: always()
         id: check_sca
@@ -103,6 +105,7 @@ jobs:
           fi
 
       - name: Upload Snyk SCA SARIF to GitHub Security
+        if: always() && steps.check_sca.outputs.found == 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-sca.sarif
@@ -221,11 +224,17 @@ jobs:
         run: |
           npm install -g snyk snyk-to-sarif
 
+          # Test container image
           snyk container test "${{ steps.meta.outputs.base_image }}" \
             --file="${{ matrix.dockerfile }}" \
             --org="$SNYK_ORG_ID" \
             --severity-threshold=high \
             --json-file-output=results.json || true
+
+          # Push container snapshot to Snyk UI
+          snyk container monitor "${{ steps.meta.outputs.base_image }}" \
+            --file="${{ matrix.dockerfile }}" \
+            --org="$SNYK_ORG_ID" || true
 
           if [ -s "results.json" ]; then
             # Convert JSON to SARIF
@@ -277,7 +286,6 @@ jobs:
             exit 1
           fi
 
-          # Get network dynamically from compose project
           NET_NAME=$(docker network ls --filter "label=com.docker.compose.network" -q | head -n 1)
           GATEWAY_IP=$(docker inspect $(docker compose ps -q gateway 2>/dev/null || docker compose ps -q | head -n 1) -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 
@@ -323,7 +331,7 @@ jobs:
             done
           fi
 
-      - name: Fetch Findings and Convert to SARIF
+      - name: Fetch Findings and Convert to SARIF (High and Critical Only)
         if: always()
         run: |
           curl -s "https://api.au.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/findings/" \
@@ -332,6 +340,7 @@ jobs:
 
           jq 'if type == "object" and .results then .results else . end' raw-findings.json > findings.json
 
+          # Converted SARIF filtered strictly for High/Critical
           jq '{
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
             version: "2.1.0",
@@ -342,7 +351,7 @@ jobs:
                     name: "Snyk API & Web (DAST)",
                     informationUri: "https://probely.com",
                     rules: [
-                      (.[]? | {
+                      (.[]? | select(.severity == "high" or .severity == "critical") | {
                         id: ((.id // "unknown") | tostring),
                         name: (.definition.name // "Unknown finding"),
                         shortDescription: { text: (.definition.name // "Unknown finding") },
@@ -353,14 +362,9 @@ jobs:
                   }
                 },
                 results: [
-                  (.[]? | {
+                  (.[]? | select(.severity == "high" or .severity == "critical") | {
                     ruleId: ((.id // "unknown") | tostring),
-                    level: (
-                      if .severity == "high" then "error"
-                      elif .severity == "medium" then "warning"
-                      else "note"
-                      end
-                    ),
+                    level: "error",
                     message: { text: "Endpoint: \(.url // "N/A")\n\n\((.definition.description // .definition.name // "No description"))" },
                     locations: [
                       {
