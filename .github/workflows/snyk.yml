@@ -121,7 +121,7 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          snyk code test --severity-threshold=high --sarif-file-output=snyk-code.sarif || true
+          snyk code test --severity-threshold=high --report --sarif-file-output=snyk-code.sarif || true
 
       - name: Check Snyk Code SARIF output
         if: always()
