@@ -175,23 +175,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Snyk CLI
-        run: npm install -g snyk
-
-      # Queries Snyk API for the Dockerfile's base image — takes ~5 seconds, NO docker build!
-      - name: Fetch Dockerfile Findings from Snyk
+      - name: Fetch Existing Snyk Container Issues via API
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }} 
         run: |
-          snyk container test --file=Dockerfile --sarif-file-output=snyk-container.sarif || true
+          # Download snyk-to-sarif converter tool
+          npm install -g snyk-to-sarif
 
-      - name: Fix SARIF format for GitHub
-        if: always()
-        run: |
-          if [ -f "snyk-container.sarif" ]; then
-            jq '(.runs[].results[]? | select(.locations == null or .locations == [])) |= . + {"locations": [{"physicalLocation": {"artifactLocation": {"uri": "Dockerfile"}}}]}' snyk-container.sarif > snyk-container-fixed.sarif
-            mv snyk-container-fixed.sarif snyk-container.sarif
-          fi
+          # Export container issues via Snyk CLI
+          snyk container test --file=Dockerfile --json-file-output=snyk-raw.json || true
+
+          # Convert output to SARIF format
+          snyk-to-sarif -i snyk-raw.json -o snyk-container.sarif
 
       - name: Upload Container results to GitHub
         if: always()
