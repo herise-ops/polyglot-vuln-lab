@@ -180,34 +180,38 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
           SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }}
         run: |
-          npm install -g snyk snyk-to-sarif jq
+          # 1. Install Snyk CLI & SARIF converter (Use system apt for jq)
+          sudo apt-get update && sudo apt-get install -y jq
+          npm install -g snyk snyk-to-sarif
 
-          # 1. Find all files named "Dockerfile" or starting with "Dockerfile." in any subfolder
+          # 2. Find all Dockerfiles across microservices
           DOCKERFILES=$(find . -type f \( -name "Dockerfile" -o -name "Dockerfile.*" \))
 
           # Initialize an empty combined SARIF structure
           echo '{"$schema":"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json","version":"2.1.0","runs":[]}' > combined.sarif
 
-          # 2. Loop dynamically over every discovered Dockerfile
+          # 3. Loop dynamically over every discovered Dockerfile
           for df in $DOCKERFILES; do
             echo "------------------------------------------------"
             echo "Processing Dockerfile: $df"
             
-            # Extract the base image FROM line
+            # Extract the base image FROM line cleanly
             BASE_IMAGE=$(grep -i '^FROM' "$df" | tail -n 1 | awk '{print $NF}')
             
             if [ -n "$BASE_IMAGE" ]; then
               echo "Found base image: $BASE_IMAGE"
               
-              # Run Snyk scan for this specific Dockerfile
+              # Run Snyk container scan
               snyk container test "$BASE_IMAGE" --file="$df" --org="$SNYK_ORG_ID" --json-file-output=temp-raw.json || true
               
-              # Convert raw JSON findings to temporary SARIF
+              # Convert raw JSON findings to SARIF
               snyk-to-sarif -i temp-raw.json -o temp.sarif
               
-              # Merge runs into combined.sarif using jq
-              jq -s '.[0].runs += .[1].runs | .[0]' combined.sarif temp.sarif > updated.sarif
-              mv updated.sarif combined.sarif
+              # Safely merge runs into combined.sarif
+              if [ -s temp.sarif ]; then
+                jq -s '.[0].runs += (.[1].runs // []) | .[0]' combined.sarif temp.sarif > updated.sarif
+                mv updated.sarif combined.sarif
+              fi
             fi
           done
 
