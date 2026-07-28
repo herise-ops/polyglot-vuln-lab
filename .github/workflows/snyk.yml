@@ -91,9 +91,6 @@ jobs:
           # Test and generate SARIF output for GitHub Code Scanning
           snyk test --all-projects --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-sca.sarif || true
           
-          # Monitor projects in Snyk UI to align findings count
-          snyk monitor --all-projects --org=${{ secrets.SNYK_ORG_ID }} || true
-
       - name: Check SCA SARIF output
         if: always()
         id: check_sca
@@ -224,46 +221,31 @@ jobs:
         run: |
           npm install -g snyk snyk-to-sarif
 
-          # Test container image
+          # Test container base image
           snyk container test "${{ steps.meta.outputs.base_image }}" \
             --file="${{ matrix.dockerfile }}" \
             --org="$SNYK_ORG_ID" \
             --severity-threshold=high \
             --json-file-output=results.json || true
 
-          # Push container snapshot to Snyk UI
-          snyk container monitor "${{ steps.meta.outputs.base_image }}" \
-            --file="${{ matrix.dockerfile }}" \
-            --org="$SNYK_ORG_ID" || true
-
+          # Convert JSON to SARIF & Deduplicate
           if [ -s "results.json" ]; then
-            # Convert JSON to SARIF
             snyk-to-sarif -i results.json -o results-temp.sarif
 
-            # Update Tool Name AND Deduplicate results by ruleId/CVE
+            # Rename tool driver & deduplicate by ruleId/CVE
             jq '
               .runs[].tool.driver.name = "Snyk Container" |
               .runs[].results |= unique_by(.ruleId)
             ' results-temp.sarif > results.sarif
           fi
 
-      - name: Check Container SARIF output
-        if: always() && matrix.dockerfile != 'none'
-        id: check_container_sarif
-        run: |
-          if [ -s "results.sarif" ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Upload Container SARIF to GitHub
-        if: always() && matrix.dockerfile != 'none' && steps.check_container_sarif.outputs.found == 'true'
-        uses: github/codeql-action/upload-sarif@v4
+        if: always() && matrix.dockerfile != 'none'
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: results.sarif
           category: snyk-container-${{ steps.meta.outputs.service }}
-
+          
   # ===========================================================================
   # UAT PHASE — Heavy scans: Container image build & DAST live integration
   # ===========================================================================
