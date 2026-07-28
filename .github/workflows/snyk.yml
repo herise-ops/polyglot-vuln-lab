@@ -76,7 +76,7 @@ jobs:
             || echo "::warning::one or more npm installs failed"
 
           find . -name "composer.json" -not -path "*/vendor/*" \
-            -execdir composer install --no-interaction --no-audit \; \
+            -execdir sh -c 'COMPOSER_AUDIT=0 composer install --no-interaction --ignore-platform-reqs' \; \
             || echo "::warning::one or more composer installs failed"
 
           find . -name "*.csproj" \
