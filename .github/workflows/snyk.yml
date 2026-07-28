@@ -86,7 +86,7 @@ jobs:
                 snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
                 ;;
               *composer.json)
-                composer install --no-interaction
+                composer install --no-interaction --no-audit
                 snyk test --sarif-file-output="../sarif-output/snyk-sca-${service}.sarif" --severity-threshold=high
                 ;;
               *.csproj)
@@ -105,20 +105,26 @@ jobs:
           echo "overall_exit=$OVERALL_EXIT" >> "$GITHUB_OUTPUT"
           exit $OVERALL_EXIT
 
-      - name: Upload SCA results per service to GitHub Code Scanning
+      - name: Check if SARIF output directory has files
         if: always()
+        id: check_sarif
         run: |
-          for f in sarif-output/*.sarif; do
-            [ -f "$f" ] && echo "Found: $f"
-          done
+          if ls sarif-output/*.sarif 1> /dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Found SARIF files to upload:"
+            ls -la sarif-output
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No SARIF files were generated."
+          fi
 
       - name: Upload snyk-sca SARIF files
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        if: always() && steps.check_sarif.outputs.found == 'true'
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: sarif-output
           category: snyk-sca
-
+          
   snyk-code:
     runs-on: ubuntu-latest
     steps:
