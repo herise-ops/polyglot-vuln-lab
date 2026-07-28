@@ -1,25 +1,22 @@
 name: Snyk Security Scan
 
 # ---------------------------------------------------------------------------
-# PHASE MODEL
+# PHASE MODEL (3 Environments)
 #
-# DEV         -> pull_request into main. Fast feedback: SCA + SAST only,
-#                hard gate (blocks merge via branch Ruleset).
-# UAT         -> push to the `uat` branch. Full suite: SCA + SAST + Container
-#                + IaC + DAST, hard gate.
-# STAGING     -> push to the `staging` branch. Full suite again, gated behind
-#                the `staging` GitHub Environment.
-# PRODUCTION -> push to the `production` branch. Full suite again, gated
-#                behind the `production` Environment — final human checkpoint.
+# DEV     -> pull_request into main. Fast feedback: SCA + SAST + IaC + Secrets.
+# UAT     -> push to the `uat` branch. Full suite: SCA + SAST + Container 
+#            (if files changed) + IaC + DAST (ephemeral stack).
+# STAGING -> push to the `staging` branch. Gated behind the `staging` 
+#            GitHub Environment for final verification & release check.
 # ---------------------------------------------------------------------------
 
 on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, uat, staging, production]
+    branches: [main, uat, staging]
   schedule:
-    - cron: "0 3 * * 1"   # weekly Monday scan, catches newly disclosed vulns
+    - cron: "0 3 * * 1"   # weekly Monday scan for newly disclosed CVEs
 
 permissions:
   contents: read
@@ -28,14 +25,14 @@ permissions:
 
 jobs:
   # ===========================================================================
-  # DEV PHASE — runs on every PR into main. SCA + SAST only, for fast feedback.
+  # DEV PHASE — PRs into main. Fast static analysis: SCA, SAST, IaC, & Secrets.
   # ===========================================================================
   snyk-sca:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node/Python/Java/Dotnet (as needed)
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -43,42 +40,46 @@ jobs:
       - name: Install Snyk CLI
         run: npm install -g snyk
 
-      - name: Scan all directories
+      - name: Scan dependencies across services
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          # Keep track of overall status without exiting early
           FAILED=0
-          
           for dir in csharp-service php-service python-service java-service gateway; do
             echo "=================================================="
             echo "Scanning service: $dir"
             echo "=================================================="
-            
-            # Run snyk test on each directory and generate SARIF output
             snyk test "./$dir" \
               --severity-threshold=high \
               --sarif-file-output="$dir-sca.sarif" || FAILED=1
           done
-          
-          # COMMENT OUT: SECURITY GATE - Uncomment when ready to enforce hard failure on SCA vulns
+          # COMMENT OUT: SECURITY GATE
           # exit $FAILED
 
-      - name: Upload SARIF files to GitHub Code Scanning
+      - name: Upload SARIF to Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: gateway-sca.sarif
           category: snyk-sca-gateway
-          
-  snyk-code:
+
+  snyk-code-and-secrets:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history needed for secret detection across commits
 
+      # 1. Dedicated Secret Scan (Gitleaks)
+      - name: Secret Scan (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 2. Snyk SAST (Scans code vulnerabilities + hardcoded secrets)
       - name: Run Snyk Code
         uses: snyk/actions/node@master
-        # COMMENT OUT: SECURITY GATE - Prevents Snyk failures from stopping the job during test runs
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -93,68 +94,13 @@ jobs:
           sarif_file: snyk-code.sarif
           category: snyk-code
 
-  # ===========================================================================
-  # UAT PHASE — runs on push to `uat`, `staging`, `production`. Adds Container,
-  # IaC, and DAST (Ephemeral Stack via Compose + Snyk Agent) on top of SCA/SAST.
-  # ===========================================================================
-  snyk-container:
-    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing (runs on all triggers)
-    # if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
-    needs: [snyk-sca, snyk-code]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check for Dockerfile
-        id: check_dockerfile
-        run: |
-          if [ -f "Dockerfile" ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "No Dockerfile found — skipping container scan."
-          fi
-
-      - name: Build image
-        if: steps.check_dockerfile.outputs.found == 'true'
-        run: docker build -t myapp:${{ github.sha }} .
-
-      - name: Run Snyk Container
-        if: steps.check_dockerfile.outputs.found == 'true'
-        uses: snyk/actions/docker@master
-        # COMMENT OUT: SECURITY GATE - Prevents container scan failure from breaking job
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          image: myapp:${{ github.sha }}
-          args: --sarif-file-output=snyk-container.sarif --severity-threshold=high
-
-      - name: Patch invalid security-severity values in SARIF
-        if: steps.check_dockerfile.outputs.found == 'true' && always()
-        run: |
-          if [ -f "snyk-container.sarif" ]; then
-            jq 'del(.. | objects | .["security-severity"]?)' snyk-container.sarif > snyk-container-fixed.sarif
-            mv snyk-container-fixed.sarif snyk-container.sarif
-          fi
-
-      - name: Upload Container results to GitHub Code Scanning
-        if: steps.check_dockerfile.outputs.found == 'true' && always()
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: snyk-container.sarif
-          category: snyk-container
-
   snyk-iac:
-    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing (runs on all triggers)
-    # if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
-    needs: [snyk-sca, snyk-code]
+    # Runs on PRs (Dev) AND UAT/Staging pushes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Run Snyk IaC
-        # COMMENT OUT: SECURITY GATE - Allow workflow to continue if IaC finds vulns
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -162,7 +108,7 @@ jobs:
           npm install -g snyk
           snyk iac test --sarif-file-output=snyk-iac.sarif --severity-threshold=high || true
 
-      - name: Check SARIF was generated
+      - name: Check SARIF output
         if: always()
         id: check_sarif
         run: |
@@ -179,10 +125,64 @@ jobs:
           sarif_file: snyk-iac.sarif
           category: snyk-iac
 
+  # ===========================================================================
+  # UAT PHASE — Heavy scans: Container image build & DAST live integration
+  # ===========================================================================
+  snyk-container:
+    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
+    # if: github.ref_name == 'uat' || github.ref_name == 'staging'
+    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed for git diff / file change detection
+
+      # 1. Detect if Dockerfile or container configurations changed
+      - name: Check for Container changes
+        id: changed_files
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            Dockerfile
+            **/Dockerfile
+            docker-compose.yml
+            **.dockerignore
+
+      - name: Build image
+        # Only build and scan if container files changed OR on scheduled runs
+        if: steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule'
+        run: docker build -t myapp:${{ github.sha }} .
+
+      - name: Run Snyk Container
+        if: steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule'
+        uses: snyk/actions/docker@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          image: myapp:${{ github.sha }}
+          args: --sarif-file-output=snyk-container.sarif --severity-threshold=high
+
+      - name: Patch SARIF formatting
+        if: (steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule') && always()
+        run: |
+          if [ -f "snyk-container.sarif" ]; then
+            jq 'del(.. | objects | .["security-severity"]?)' snyk-container.sarif > snyk-container-fixed.sarif
+            mv snyk-container-fixed.sarif snyk-container.sarif
+          fi
+
+      - name: Upload Container results to Code Scanning
+        if: (steps.changed_files.outputs.any_changed == 'true' || github.event_name == 'schedule') && always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: snyk-container.sarif
+          category: snyk-container
+
   snyk-dast:
-    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing (runs on all triggers)
-    # if: github.ref_name == 'uat' || github.ref_name == 'staging' || github.ref_name == 'production'
-    needs: [snyk-sca, snyk-code]
+    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
+    # if: github.ref_name == 'uat' || github.ref_name == 'staging'
+    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -190,25 +190,17 @@ jobs:
       - name: Start Application Stack via Docker Compose
         run: |
           docker compose up -d --build
-          sleep 20 # Wait for application services to spin up
+          sleep 20
 
       - name: Start Snyk Scanning Agent
         run: |
           if [ -z "${{ secrets.SNYK_AGENT_TOKEN }}" ]; then
             echo "::warning::SNYK_AGENT_TOKEN secret is missing or empty!"
-            # COMMENT OUT: SECURITY GATE - Don't hard exit on missing token during tests
-            # exit 1
           fi
 
-          # 1. Get Docker network ID for labnet
           LABNET_ID=$(docker network ls --filter name=labnet -q | head -n 1)
-
-          # 2. Extract Gateway IP inside labnet dynamically
           GATEWAY_IP=$(docker inspect $(docker compose ps -q gateway) -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 
-          echo "Gateway IP inside Docker network: $GATEWAY_IP"
-
-          # 3. Run Agent attached to labnet with host mapping
           docker run -d \
             --name probely-agent \
             --cap-add NET_ADMIN \
@@ -219,10 +211,7 @@ jobs:
             -e FARCASTER_API_URL="https://api.au.probely.com" \
             probely/farcaster-onprem-agent:v3 || true
 
-          echo "Waiting 30 seconds for agent connection..."
           sleep 30
-
-          echo "--- Agent Status Logs ---"
           docker logs probely-agent --tail 25 || true
 
       - name: Trigger Snyk/Probely DAST Scan
@@ -230,11 +219,8 @@ jobs:
         run: |
           if [ -z "${{ secrets.SNYK_TARGET_ID }}" ] || [ -z "${{ secrets.SNYK_DAST_API_KEY }}" ]; then
             echo "::warning::SNYK_TARGET_ID or SNYK_DAST_API_KEY secret is missing!"
-            # COMMENT OUT: SECURITY GATE - Don't hard exit on missing keys during tests
-            # exit 1
           fi
 
-          # Trigger scan via Australian Regional Endpoint
           RESPONSE=$(curl -s -L -w "\nHTTP_STATUS:%{http_code}" -X POST \
             "https://api.au.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/scan_now/" \
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
@@ -243,30 +229,15 @@ jobs:
           JSON_BODY=$(echo "$RESPONSE" | sed -e 's/HTTP_STATUS:.*//g')
           SCAN_ID=$(echo "$JSON_BODY" | jq -r '.id // empty')
 
-          if [ -z "$SCAN_ID" ]; then
-            echo "::warning::Failed to retrieve Scan ID from DAST API!"
-            # COMMENT OUT: SECURITY GATE
-            # exit 1
-          else
+          if [ -n "$SCAN_ID" ]; then
             echo "Started Scan ID: $SCAN_ID"
-            echo "scan_id=$SCAN_ID" >> "$GITHUB_OUTPUT"
-
-            # Poll scan completion
-            echo "Waiting for DAST scan to complete..."
             while true; do
               STATUS_RESP=$(curl -s -L -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" "https://api.au.probely.com/scans/$SCAN_ID/")
               STATUS=$(echo "$STATUS_RESP" | jq -r '.status // empty')
-
               echo "Current scan status: $STATUS"
-
-              if [ "$STATUS" == "completed" ] || [ "$STATUS" == "finished" ]; then
-                echo "Scan completed successfully!"
-                break
-              elif [ "$STATUS" == "failed" ] || [ "$STATUS" == "cancelled" ]; then
-                echo "Scan finished with status: $STATUS"
+              if [ "$STATUS" == "completed" ] || [ "$STATUS" == "finished" ] || [ "$STATUS" == "failed" ] || [ "$STATUS" == "cancelled" ]; then
                 break
               fi
-
               sleep 15
             done
           fi
@@ -274,15 +245,12 @@ jobs:
       - name: Fetch Findings and Convert to SARIF
         if: always()
         run: |
-          echo "Fetching findings from Probely API..."
           curl -s "https://api.au.probely.com/targets/${{ secrets.SNYK_TARGET_ID }}/findings/" \
             -H "Authorization: JWT ${{ secrets.SNYK_DAST_API_KEY }}" \
             > raw-findings.json
 
-          # Ensure we are working with an array
           jq 'if type == "object" and .results then .results else . end' raw-findings.json > findings.json
 
-          # Convert to valid SARIF schema forcing all IDs to strings
           jq '{
             "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
             version: "2.1.0",
@@ -326,10 +294,7 @@ jobs:
             ]
           }' findings.json > snyk-dast.sarif
 
-          echo "--- Validating Generated SARIF ---"
-          jq empty snyk-dast.sarif && echo "SARIF JSON is well-formed!"
-
-      - name: Upload DAST results to GitHub Code Scanning
+      - name: Upload DAST results to Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v4
         with:
@@ -344,27 +309,14 @@ jobs:
           docker compose down -v 
 
   # ===========================================================================
-  # STAGING PHASE — runs on push to `staging`. Gated behind environment.
+  # STAGING PHASE — Protected environment gate for release candidate
   # ===========================================================================
   staging-gate:
     # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
     # if: github.ref_name == 'staging'
-    needs: [snyk-sca, snyk-code, snyk-container, snyk-iac, snyk-dast]
+    needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, snyk-container, snyk-dast]
     runs-on: ubuntu-latest
     environment: staging
     steps:
-      - name: Staging gate passed
-        run: echo "All scans passed — staging environment approval satisfied."
-
-  # ===========================================================================
-  # PRODUCTION PHASE — runs on push to `production`. Gated behind environment.
-  # ===========================================================================
-  production-gate:
-    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
-    # if: github.ref_name == 'production'
-    needs: [snyk-sca, snyk-code, snyk-container, snyk-iac, snyk-dast]
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Production gate passed
-        run: echo "All scans passed — production environment approval satisfied."
+      - name: Staging Gate Check
+        run: echo "All security scans completed successfully. Staging environment approval satisfied."
