@@ -200,28 +200,28 @@ jobs:
           BASE_IMAGE=$(grep -i '^FROM' "${{ matrix.dockerfile }}" | tail -n 1 | awk '{print $NF}')
           echo "service=$SERVICE" >> $GITHUB_OUTPUT
           echo "base_image=$BASE_IMAGE" >> $GITHUB_OUTPUT
-          
+
       - name: Scan Container with Snyk
         if: matrix.dockerfile != 'none'
         env:
-            SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-            SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }}
-          run: |
-            npm install -g snyk snyk-to-sarif
-            
-            # Add --severity-threshold=high here
-            snyk container test "${{ steps.meta.outputs.base_image }}" \
-              --file="${{ matrix.dockerfile }}" \
-              --org="$SNYK_ORG_ID" \
-              --severity-threshold=high \
-              --json-file-output=results.json || true
-            
-            # Convert JSON to SARIF
-            snyk-to-sarif -i results.json -o results-temp.sarif
-        
-            # Update the Tool name inside SARIF to "Snyk Container"
-            jq '.runs[].tool.driver.name = "Snyk Container"' results-temp.sarif > results.sarif
-            
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }}
+        run: |
+          npm install -g snyk snyk-to-sarif
+
+          # Add --severity-threshold=high here
+          snyk container test "${{ steps.meta.outputs.base_image }}" \
+            --file="${{ matrix.dockerfile }}" \
+            --org="$SNYK_ORG_ID" \
+            --severity-threshold=high \
+            --json-file-output=results.json || true
+
+          # Convert JSON to SARIF
+          snyk-to-sarif -i results.json -o results-temp.sarif
+
+          # Update the Tool name inside SARIF to "Snyk Container"
+          jq '.runs[].tool.driver.name = "Snyk Container"' results-temp.sarif > results.sarif
+
       - name: Upload Container SARIF to GitHub
         if: always() && matrix.dockerfile != 'none'
         uses: github/codeql-action/upload-sarif@v4
