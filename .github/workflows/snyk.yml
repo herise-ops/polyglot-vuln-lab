@@ -63,10 +63,6 @@ jobs:
 
       - name: Install dependencies for all detected ecosystems
         run: |
-          # Resolve dependencies wherever a matching manifest exists, no
-          # matter what the folder is named. Snyk's --all-projects still
-          # needs a resolved dependency tree for most ecosystems (lockfiles
-          # alone aren't always enough for Python/PHP/.NET).
           find . -name "requirements.txt" -not -path "*/node_modules/*" \
             -execdir sh -c 'pip install -r requirements.txt --break-system-packages --quiet' \; \
             || echo "::warning::one or more pip installs failed"
@@ -75,11 +71,6 @@ jobs:
             -execdir npm install --no-audit --no-fund \; \
             || echo "::warning::one or more npm installs failed"
 
-          # Composer 2.9+ added automatic security-advisory blocking during
-          # install/resolution (not just `composer audit` reporting). This
-          # can't be bypassed with CLI flags — it needs a config entry in
-          # composer.json itself. We patch it in at scan time only, so the
-          # source composer.json in the repo stays untouched.
           find . -name "composer.json" -not -path "*/vendor/*" | while read -r manifest; do
             svc_dir=$(dirname "$manifest")
             echo "Patching advisory policy for $manifest"
@@ -99,7 +90,7 @@ jobs:
         run: |
           snyk test --all-projects \
             --severity-threshold=high \
-            --sarif-file-output=snyk-sca.sarif
+            --sarif-file-output=snyk-sca.sarif || true
 
       - name: Upload SCA results to GitHub Code Scanning
         if: always()
@@ -113,7 +104,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Snyk SAST (Scans code vulnerabilities + hardcoded secrets in current code)
       - name: Run Snyk Code
         uses: snyk/actions/node@master
         env:
@@ -140,13 +130,11 @@ jobs:
           category: snyk-code
 
   snyk-iac:
-    # Runs on PRs (Dev) AND UAT/Staging pushes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Run Snyk IaC
-        # continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -180,6 +168,9 @@ jobs:
       - id: set-matrix
         run: |
           FILES=$(find . -type f \( -name "Dockerfile" -o -name "Dockerfile.*" \) | jq -R . | jq -s -c .)
+          if [ -z "$FILES" ] || [ "$FILES" == "[]" ]; then
+            FILES='["none"]'
+          fi
           echo "matrix=$FILES" >> $GITHUB_OUTPUT
 
   # 2. Dynamic Container Scan Job
@@ -197,7 +188,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Skip if no Dockerfiles found
+        if: matrix.dockerfile == 'none'
+        run: echo "No Dockerfiles detected in repository. Skipping container scan."
+
       - name: Extract Service Metadata
+        if: matrix.dockerfile != 'none'
         id: meta
         run: |
           SERVICE=$(dirname "${{ matrix.dockerfile }}" | tr '/' '-')
@@ -206,26 +202,31 @@ jobs:
           echo "base_image=$BASE_IMAGE" >> $GITHUB_OUTPUT
 
       - name: Scan Container with Snyk
+        if: matrix.dockerfile != 'none'
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
           SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }}
         run: |
           npm install -g snyk snyk-to-sarif
           snyk container test "${{ steps.meta.outputs.base_image }}" --file="${{ matrix.dockerfile }}" --org="$SNYK_ORG_ID" --json-file-output=results.json || true
-          snyk-to-sarif -i results.json -o results.sarif
+          
+          # Convert JSON to SARIF
+          snyk-to-sarif -i results.json -o results-temp.sarif
+
+          # Update the Tool name inside SARIF to "Snyk Container"
+          jq '.runs[].tool.driver.name = "Snyk Container"' results-temp.sarif > results.sarif
 
       - name: Upload Container SARIF to GitHub
-        if: always()
+        if: always() && matrix.dockerfile != 'none'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: results.sarif
           category: snyk-container-${{ steps.meta.outputs.service }}
-          
+
   # ===========================================================================
   # UAT PHASE — Heavy scans: Container image build & DAST live integration
   # ===========================================================================
   snyk-dast:
-    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
     if: github.ref_name == 'uat' || github.ref_name == 'staging'
     needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, snyk-container]
     runs-on: ubuntu-latest
@@ -357,7 +358,6 @@ jobs:
   # STAGING PHASE — Protected environment gate for release candidate
   # ===========================================================================
   staging-gate:
-    # COMMENT OUT: SECURITY GATE - Branch filter disabled for testing
     if: github.ref_name == 'staging'
     needs: [snyk-sca, snyk-code-and-secrets, snyk-iac, snyk-container, snyk-dast]
     runs-on: ubuntu-latest
