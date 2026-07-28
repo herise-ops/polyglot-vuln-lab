@@ -62,7 +62,7 @@ jobs:
           sarif_file: gateway-sca.sarif
           category: snyk-sca-gateway
 
-snyk-code-and-secrets:
+  snyk-code-and-secrets:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -92,7 +92,7 @@ snyk-code-and-secrets:
         with:
           sarif_file: snyk-code.sarif
           category: snyk-code
-          
+
   snyk-iac:
     # Runs on PRs (Dev) AND UAT/Staging pushes
     runs-on: ubuntu-latest
@@ -305,7 +305,7 @@ snyk-code-and-secrets:
         run: |
           docker stop probely-agent || true
           docker rm probely-agent || true
-          docker compose down -v 
+          docker compose down -v
 
   # ===========================================================================
   # STAGING PHASE — Protected environment gate for release candidate
