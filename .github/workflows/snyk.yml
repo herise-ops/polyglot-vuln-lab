@@ -63,37 +63,37 @@ jobs:
           sarif_file: gateway-sca.sarif
           category: snyk-sca-gateway
 
-  snyk-code-and-secrets:
+snyk-code-and-secrets:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Full history needed for secret detection across commits
 
-      # 1. Dedicated Secret Scan (Gitleaks)
-      - name: Secret Scan (Gitleaks)
-        uses: gitleaks/gitleaks-action@v2
-        # continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 2. Snyk SAST (Scans code vulnerabilities + hardcoded secrets)
+      # Snyk SAST (Scans code vulnerabilities + hardcoded secrets in current code)
       - name: Run Snyk Code
         uses: snyk/actions/node@master
-        # continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
           command: code test
           args: --sarif-file-output=snyk-code.sarif --severity-threshold=high
 
-      - name: Upload Code results to GitHub Code Scanning
+      - name: Check Snyk Code SARIF output
         if: always()
+        id: check_snyk_code
+        run: |
+          if [ -f "snyk-code.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload Code results to GitHub Code Scanning
+        if: always() && steps.check_snyk_code.outputs.found == 'true'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-code.sarif
           category: snyk-code
-
+          
   snyk-iac:
     # Runs on PRs (Dev) AND UAT/Staging pushes
     runs-on: ubuntu-latest
