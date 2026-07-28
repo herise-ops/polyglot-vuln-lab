@@ -175,29 +175,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch Existing Snyk Container Issues via API
+      - name: Dynamic Scan of All Dockerfiles
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
           SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }}
         run: |
-          # 1. Install Snyk CLI and SARIF converter
-          npm install -g snyk snyk-to-sarif
+          npm install -g snyk snyk-to-sarif jq
 
-          # 2. Extract base image from Dockerfile
-          BASE_IMAGE=$(grep -i '^FROM' Dockerfile | head -n 1 | awk '{print $2}')
-          echo "Scanning base image: $BASE_IMAGE"
+          # 1. Find all files named "Dockerfile" or starting with "Dockerfile." in any subfolder
+          DOCKERFILES=$(find . -type f \( -name "Dockerfile" -o -name "Dockerfile.*" \))
 
-          # 3. Export findings to JSON
-          snyk container test "$BASE_IMAGE" --file=Dockerfile --org="$SNYK_ORG_ID" --json-file-output=snyk-raw.json || true
+          # Initialize an empty combined SARIF structure
+          echo '{"$schema":"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json","version":"2.1.0","runs":[]}' > combined.sarif
 
-          # 4. Convert JSON to SARIF
-          snyk-to-sarif -i snyk-raw.json -o snyk-container.sarif
+          # 2. Loop dynamically over every discovered Dockerfile
+          for df in $DOCKERFILES; do
+            echo "------------------------------------------------"
+            echo "Processing Dockerfile: $df"
+            
+            # Extract the base image FROM line
+            BASE_IMAGE=$(grep -i '^FROM' "$df" | tail -n 1 | awk '{print $NF}')
+            
+            if [ -n "$BASE_IMAGE" ]; then
+              echo "Found base image: $BASE_IMAGE"
+              
+              # Run Snyk scan for this specific Dockerfile
+              snyk container test "$BASE_IMAGE" --file="$df" --org="$SNYK_ORG_ID" --json-file-output=temp-raw.json || true
+              
+              # Convert raw JSON findings to temporary SARIF
+              snyk-to-sarif -i temp-raw.json -o temp.sarif
+              
+              # Merge runs into combined.sarif using jq
+              jq -s '.[0].runs += .[1].runs | .[0]' combined.sarif temp.sarif > updated.sarif
+              mv updated.sarif combined.sarif
+            fi
+          done
 
       - name: Upload Container results to GitHub
         if: always()
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: snyk-container.sarif
+          sarif_file: combined.sarif
           category: snyk-container
           
   # ===========================================================================
