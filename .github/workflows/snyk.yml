@@ -36,6 +36,28 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Install Snyk CLI
         run: npm install -g snyk
 
@@ -48,6 +70,41 @@ jobs:
             echo "=================================================="
             echo "Scanning service: $dir"
             echo "=================================================="
+
+            # Install/resolve dependencies first — snyk test needs an
+            # actual resolvable dependency tree for most ecosystems,
+            # not just the manifest file sitting on disk.
+            case "$dir" in
+              csharp-service)
+                if [ -d "$dir" ]; then
+                  (cd "$dir" && dotnet restore) || echo "::warning::dotnet restore failed for $dir"
+                fi
+                ;;
+              php-service)
+                if [ -d "$dir" ]; then
+                  (cd "$dir" && composer install --no-interaction) || echo "::warning::composer install failed for $dir"
+                fi
+                ;;
+              python-service)
+                if [ -d "$dir" ]; then
+                  (cd "$dir" && pip install -r requirements.txt --break-system-packages --quiet) || echo "::warning::pip install failed for $dir"
+                fi
+                ;;
+              java-service)
+                # pom.xml is readable statically in most cases — no install needed
+                ;;
+              gateway)
+                if [ -d "$dir" ]; then
+                  (cd "$dir" && npm install --no-audit --no-fund) || echo "::warning::npm install failed for $dir"
+                fi
+                ;;
+            esac
+
+            if [ ! -d "$dir" ]; then
+              echo "Directory $dir not found — skipping."
+              continue
+            fi
+
             snyk test "./$dir" \
               --severity-threshold=high \
               --sarif-file-output="$dir-sca.sarif" || FAILED=1
