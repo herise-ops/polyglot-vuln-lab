@@ -84,19 +84,13 @@ jobs:
             -execdir dotnet restore \; \
             || echo "::warning::one or more dotnet restores failed"
 
-      - name: Scan entire repo with Snyk
+      - name: Run Snyk Open Source (SCA)
+        uses: snyk/actions/node@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-          SNYK_ORG_ID: ${{ secrets.SNYK_ORG_ID }}
-        run: |
-          # 1. Test & output SARIF for GitHub Security tab
-          snyk test --all-projects \
-            --org="$SNYK_ORG_ID" \
-            --severity-threshold=high \
-            --sarif-file-output=snyk-sca.sarif || true
-
-          # 2. Push Open Source inventory & vulnerabilities to Snyk Web Dashboard
-          snyk monitor --all-projects --org="$SNYK_ORG_ID" || true
+          SNYK_CFG_ORG: ${{ secrets.SNYK_ORG_ID }}
+        with:
+          args: --all-projects --org=${{ secrets.SNYK_ORG_ID }} --severity-threshold=high --sarif-file-output=snyk-sca.sarif
 
       - name: Check SCA SARIF output
         if: always()
