@@ -92,8 +92,18 @@ jobs:
             --severity-threshold=high \
             --sarif-file-output=snyk-sca.sarif || true
 
-      - name: Upload SCA results to GitHub Code Scanning
+      - name: Check SCA SARIF output
         if: always()
+        id: check_sca
+        run: |
+          if [ -s "snyk-sca.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload SCA results to GitHub Code Scanning
+        if: always() && steps.check_sca.outputs.found == 'true'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-sca.sarif
@@ -104,19 +114,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Snyk CLI
+        uses: snyk/actions/setup@master
+
       - name: Run Snyk Code
-        uses: snyk/actions/node@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: code test
-          args: --sarif-file-output=snyk-code.sarif --severity-threshold=high
+        run: |
+          snyk code test --severity-threshold=high --sarif-file-output=snyk-code.sarif || true
 
       - name: Check Snyk Code SARIF output
         if: always()
         id: check_snyk_code
         run: |
-          if [ -f "snyk-code.sarif" ]; then
+          if [ -s "snyk-code.sarif" ]; then
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
@@ -145,7 +156,7 @@ jobs:
         if: always()
         id: check_sarif
         run: |
-          if [ -f "snyk-iac.sarif" ]; then
+          if [ -s "snyk-iac.sarif" ]; then
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
@@ -215,17 +226,29 @@ jobs:
             --severity-threshold=high \
             --json-file-output=results.json || true
 
-          # Convert JSON to SARIF
-          snyk-to-sarif -i results.json -o results-temp.sarif
+          if [ -s "results.json" ]; then
+            # Convert JSON to SARIF
+            snyk-to-sarif -i results.json -o results-temp.sarif
 
-          # Update Tool Name AND Deduplicate results by ruleId/CVE
-          jq '
-            .runs[].tool.driver.name = "Snyk Container" |
-            .runs[].results |= unique_by(.ruleId)
-          ' results-temp.sarif > results.sarif
-          
-      - name: Upload Container SARIF to GitHub
+            # Update Tool Name AND Deduplicate results by ruleId/CVE
+            jq '
+              .runs[].tool.driver.name = "Snyk Container" |
+              .runs[].results |= unique_by(.ruleId)
+            ' results-temp.sarif > results.sarif
+          fi
+
+      - name: Check Container SARIF output
         if: always() && matrix.dockerfile != 'none'
+        id: check_container_sarif
+        run: |
+          if [ -s "results.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload Container SARIF to GitHub
+        if: always() && matrix.dockerfile != 'none' && steps.check_container_sarif.outputs.found == 'true'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: results.sarif
@@ -249,18 +272,20 @@ jobs:
       - name: Start Snyk Scanning Agent
         run: |
           if [ -z "${{ secrets.SNYK_AGENT_TOKEN }}" ]; then
-            echo "::warning::SNYK_AGENT_TOKEN secret is missing or empty!"
+            echo "::error::SNYK_AGENT_TOKEN secret is missing or empty!"
+            exit 1
           fi
 
-          LABNET_ID=$(docker network ls --filter name=labnet -q | head -n 1)
-          GATEWAY_IP=$(docker inspect $(docker compose ps -q gateway) -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          # Get network dynamically from compose project
+          NET_NAME=$(docker network ls --filter "label=com.docker.compose.network" -q | head -n 1)
+          GATEWAY_IP=$(docker inspect $(docker compose ps -q gateway 2>/dev/null || docker compose ps -q | head -n 1) -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 
           docker run -d \
             --name probely-agent \
             --cap-add NET_ADMIN \
             --device /dev/net/tun \
-            --network "$LABNET_ID" \
-            --add-host gateway:$GATEWAY_IP \
+            ${NET_NAME:+--network "$NET_NAME"} \
+            ${GATEWAY_IP:+--add-host gateway:$GATEWAY_IP} \
             -e FARCASTER_AGENT_TOKEN="${{ secrets.SNYK_AGENT_TOKEN }}" \
             -e FARCASTER_API_URL="https://api.au.probely.com" \
             probely/farcaster-onprem-agent:v3 || true
@@ -272,7 +297,8 @@ jobs:
         id: trigger_scan
         run: |
           if [ -z "${{ secrets.SNYK_TARGET_ID }}" ] || [ -z "${{ secrets.SNYK_DAST_API_KEY }}" ]; then
-            echo "::warning::SNYK_TARGET_ID or SNYK_DAST_API_KEY secret is missing!"
+            echo "::error::SNYK_TARGET_ID or SNYK_DAST_API_KEY secret is missing!"
+            exit 1
           fi
 
           RESPONSE=$(curl -s -L -w "\nHTTP_STATUS:%{http_code}" -X POST \
@@ -348,8 +374,18 @@ jobs:
             ]
           }' findings.json > snyk-dast.sarif
 
-      - name: Upload DAST results to Code Scanning
+      - name: Check DAST SARIF output
         if: always()
+        id: check_dast_sarif
+        run: |
+          if [ -s "snyk-dast.sarif" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload DAST results to Code Scanning
+        if: always() && steps.check_dast_sarif.outputs.found == 'true'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: snyk-dast.sarif
